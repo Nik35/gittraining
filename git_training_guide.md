@@ -20,19 +20,23 @@ Git is a distributed version control system used to track changes in source code
 |--------------------|-------------------------------------|---------------------------------|
 | `git init`        | Initialize a new Git repository     | `git init`                     |
 | `git clone`       | Clone a remote repository           | `git clone https://gitlab.com/user/repo.git` |
-| `git status`      | Show current changes                | `git status`                   |
-| `git add`         | Stage changes                       | `git add file.txt`             |
+| `git status`      | Show the working state of your directory and staged changes | `git status` |
+| `git add`         | Stage changes to be committed       | `git add file.txt`             |
+| `git unstage`     | Remove changes from staging area    | `git restore --staged file.txt`|
 | `git commit`      | Commit staged changes               | `git commit -m "Initial commit"` |
 | `git log`         | View commit history                 | `git log`                      |
 | `git diff`        | Show file differences               | `git diff`                     |
 | `git branch`      | List/create branches                | `git branch feature-x`         |
-| `git checkout`    | Switch branches                     | `git checkout feature-x`       |
+| `git switch`      | Switch branches (cleaner than checkout) | `git switch feature-x`    |
+| `git checkout`    | Switch branches (legacy command)    | `git checkout feature-x`       |
+| `git checkout -b` | Create and switch to a new branch   | `git checkout -b new-feature`  |
 | `git merge`       | Merge branches                      | `git merge feature-x`          |
 | `git rebase`      | Reapply commits on top of another base | `git rebase main`              |
+| `git squash`      | Combine multiple commits into one   | Interactive rebase with squash: `git rebase -i HEAD~3` |
 | `git stash`       | Temporarily save changes            | `git stash`                    |
-| `git stash pop`   | Reapply stashed changes             | `git stash pop`                |
-| `git reset`       | Undo commits (soft/mixed/hard)      | `git reset --soft HEAD~1`      |
+| `git cherry-pick` | Apply a specific commit to a branch | `git cherry-pick abc1234`      |
 | `git revert`      | Create a new commit to undo changes | `git revert <commit-hash>`     |
+| `git reset`       | Undo commits (soft/mixed/hard)      | `git reset --soft HEAD~1`      |
 
 ---
 
@@ -85,7 +89,13 @@ When both branches modify the same line or conflicting changes exist, Git will p
 
 ---
 
-### 5. Undoing Changes
+### 5. Git Internals: Commit Unique ID Explained
+
+Each commit has a unique ID known as a hash. This SHA-1 hash ensures the uniqueness of all commits and helps in identifying them. The hash is created using the commit's content, timestamp, and parent commit.
+
+---
+
+### 6. Undoing Changes
 
 - **`git reset`**: Reset changes
   - `--soft`: Keeps changes staged
@@ -103,7 +113,31 @@ When both branches modify the same line or conflicting changes exist, Git will p
 
 ---
 
-### 6. Git Configuration
+### 7. Git Squash & Cherry-Pick
+
+- **Squashing Commits**:
+  Combine multiple commits into one to clean up your branch history.
+  ```bash
+  git rebase -i HEAD~n
+  # Mark commits as squash (s) except the first one
+  # Save and close editor to apply
+  ```
+
+- **Cherry-Picking**:
+  Introduce changes from a specific commit into another branch without merging entire branch histories.
+  ```bash
+  git cherry-pick <commit-hash>
+  ```
+
+---
+
+### 8. Git Configuration and Author Details
+
+- **Check Commit Author**:
+  To verify the author of a commit:
+  ```bash
+  git log --pretty=format:'%h %an %ae %s'
+  ```
 
 - **Global Config**: Applies to all repos
   ```bash
@@ -117,35 +151,37 @@ When both branches modify the same line or conflicting changes exist, Git will p
 
 ---
 
-### 7. Local vs Remote Repositories
+### 9. Git Checkout vs Switch
 
-- **Local Repo**: Your working directory + `.git` folder
-- **Remote Repo**: Hosted on GitLab (or similar)
+The `git switch` command was introduced as a simpler alternative to `git checkout`.
 
-**Diagram:**
-```plaintext
-[Working Directory] <--> [.git Directory] <--> [Remote Repository]
-```
+- **Switch Branches**:
+  ```bash
+  git switch feature-x  # Switch to an existing branch
+  git checkout feature-x  # Equivalent legacy command
+  ```
+- **Create & Switch to a New Branch**:
+  ```bash
+  git switch -c new-feature  # New command
+  git checkout -b new-feature  # Equivalent legacy command
+  ```
+
+| **Command**        | **Advantages**                  |
+|---------------------|---------------------------------|
+| `git switch`       | Cleaner, intuitive             |
+| `git checkout`     | Supports other actions (e.g. checking out a file) |
 
 ---
 
-### 8. Additional Tips
-
-- Use `.gitignore` to exclude files
-- Use `git tag` to mark releases
-- Use `git fetch` and `git pull` to sync with remote
-- Use `git push` to upload changes
-
----
-
-### 9. Summary
+### 10. Summary
 
 This guide covers:
 - Git basics and setup
-- Core commands with examples
-- Visual understanding of the Git tree
+- Core commands with examples, including new ones like `git switch`
+- Git internals like commit hashing and unique IDs
 - Merge vs Rebase with conflict resolution details
-- Undoing changes safely
-- Configuration and repo structure
+- Advanced use cases: squashing commits, cherry-picking
+- Configuration and author checks
+- The difference between `switch` and `checkout`
 
 *Perfect for onboarding new developers using Git via CLI with GitLab.*
