@@ -129,8 +129,8 @@ Use `git add <filename>` and continue the process.
 
 - **Updating Global or Local Usernames**: Save your information globally or per repository:
   ```bash
-  git config --global user.name "John Doe"
-  git config --global user.email "john@example.com"
+  git config --global user.name "Nikhil"
+  git config --global user.email "Nikhil@example.com"
   ```
 
 ---
