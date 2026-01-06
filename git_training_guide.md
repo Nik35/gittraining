@@ -1,217 +1,151 @@
-# Comprehensive Guide to Git
+# Comprehensive Git Training Guide for New Developers
 
-Welcome to this Git Training Resource! This guide will cover everything from the basics to advanced Git techniques. Whether you're a beginner or looking to deepen your Git knowledge, this guide will help you.
+### 1. Introduction to Git
 
----
+#### What is Git?
 
-## Table of Contents
+Git is a distributed version control system used to track changes in source code. It allows multiple developers to work on the same project without overwriting each other’s work.
 
-1. [Getting Started with Git](#getting-started-with-git)
-    - What is Git?
-    - Installing Git
-    - Set up Git Configuration
-2. [Git Basics](#git-basics)
-    - git init
-    - git clone
-    - git add
-    - git commit
-    - git status
-    - git log
-3. [Branching and Merging](#branching-and-merging)
-    - git branch
-    - git checkout
-    - git switch
-    - git merge
-    - git rebase
-4. [Working with Remotes](#working-with-remotes)
-    - git remote
-    - git fetch
-    - git pull
-    - git push
-5. [Advanced Git Techniques](#advanced-git-techniques)
-    - Stashing Changes (git stash)
-    - Annotated Tags (git tag)
-    - Reset, Revert, and Restore
-    - The Reflog (git reflog)
-    - Cherry-picking (git cherry-pick)
-    - Using git read-tree
-6. [Git Workflows](#git-workflows)
-    - Gitflow Workflow
-    - Forking Workflow
-    - Feature Branch Workflow
-7. [Git Troubleshooting](#git-troubleshooting)
-    - Resolving Merge Conflicts
-    - Recovering Lost Commits with git reflog
-8. [Illustrations and Examples](#illustrations-and-examples)
+#### Why Use Git?
+- **Collaboration**: Multiple developers can contribute simultaneously.
+- **History**: Track every change made to the codebase.
+- **Branching**: Work on new features without affecting the main code.
+- **Backup**: Code is stored both locally and remotely.
 
 ---
 
-## Getting Started with Git
+### 2. Essential Git Commands with Examples
 
-### What is Git?
-Git is a distributed version control system designed to handle everything from small to very large projects with speed and efficiency.
+| **Command**       | **Description**                     | **Example**                    |
+|--------------------|-------------------------------------|---------------------------------|
+| `git init`        | Initialize a new Git repository     | `git init`                     |
+| `git clone`       | Clone a remote repository           | `git clone https://gitlab.com/user/repo.git` |
+| `git status`      | Show current changes                | `git status`                   |
+| `git add`         | Stage changes                       | `git add file.txt`             |
+| `git commit`      | Commit staged changes               | `git commit -m "Initial commit"` |
+| `git log`         | View commit history                 | `git log`                      |
+| `git diff`        | Show file differences               | `git diff`                     |
+| `git branch`      | List/create branches                | `git branch feature-x`         |
+| `git checkout`    | Switch branches                     | `git checkout feature-x`       |
+| `git merge`       | Merge branches                      | `git merge feature-x`          |
+| `git rebase`      | Reapply commits on top of another base | `git rebase main`              |
+| `git stash`       | Temporarily save changes            | `git stash`                    |
+| `git stash pop`   | Reapply stashed changes             | `git stash pop`                |
+| `git reset`       | Undo commits (soft/mixed/hard)      | `git reset --soft HEAD~1`      |
+| `git revert`      | Create a new commit to undo changes | `git revert <commit-hash>`     |
 
-### Installing Git
-To install Git, follow the instructions on the [official Git website](https://git-scm.com/).
+---
 
-### Set up Git Configuration
-Run these commands to configure Git:
-```bash
-# Set your username
-$ git config --global user.name "Your Name"
+### 3. Understanding the Git Tree
 
-# Set your email
-$ git config --global user.email "youremail@example.com"
+The Git tree represents the history of commits. Each commit points to a snapshot of the project. Branches are pointers to commits, and `HEAD` points to the current branch.
+
+**Diagram:**
+```plaintext
+main
+  |
+  o---o---o (HEAD)
+         
+          o feature-x
 ```
 
 ---
 
-## Git Basics
+### 4. Merge vs Rebase
 
-### `git init`
-The `git init` command creates a new Git repository.
-```bash
-$ git init
-```
-*Example:*
-Run this in an empty directory to initialize a new Git repository.
+- **Merge**: Combines histories, creates a merge commit.
+  ```bash
+  git merge feature-x
+  ```
+- **Rebase**: Rewrites history, applies commits on top of another branch.
+  ```bash
+  git rebase main
+  ```
 
-### `git clone`
-The `git clone` command copies a repository to your machine.
-```bash
-$ git clone <repository_url>
-```
-*Example:*
-If you want to clone the public GitHub repository located at `https://github.com/Nik35/gittraining`, use:
-```bash
-$ git clone https://github.com/Nik35/gittraining.git
-```
+#### When to Use:
+- Use **merge** for preserving history.
+- Use **rebase** for a cleaner, linear history.
 
-![Cloning a Repository](https://via.placeholder.com/800x400.png)
+#### Conflict Example and Resolution:
+When both branches modify the same line or conflicting changes exist, Git will pause the rebase or merge and mark the conflicted files.
 
-### `git add`
-Stage changes for the next commit.
-```bash
-$ git add <file>
-```
-*Example:*
-```bash
-$ git add README.md
-```
-This tells Git to stage `README.md` so it can be committed later.
+1. To resolve conflicts during a rebase:
+   - Open the conflicted file(s).
+   - Manually edit the conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`) to resolve the differences.
+   - Stage the resolved files: `git add <conflicted-file>`
+   - Continue the rebase process: `git rebase --continue`
+   - If you want to abort the rebase and return to the original state: `git rebase --abort`
 
-### `git commit`
-Record the changes with a commit message.
-```bash
-$ git commit -m "Your commit message"
-```
-*Example:*
-```bash
-$ git commit -m "Add initial version of README file"
-```
+2. For merge conflicts, the process is similar:
+   - Resolve conflicts manually in the files.
+   - Stage the resolved files with `git add`.
+   - Complete the merge with: `git commit`
 
-### `git status`
-Check the status of your repository.
-```bash
-$ git status
-```
-*Example:*
-```bash
-$ git status
-On branch main
-Your branch is up to date with 'origin/main'.
-Changes to be committed:
-    modified: README.md
-```
+*Always review the changes carefully before continuing.*
 
-### `git log`
-View the commit history.
-```bash
-$ git log
-```
-*Example:*
-```bash
-$ git log --oneline
-1f94060 Add README file
-9bf6ea6 Create a new comprehensive Git training guide
+---
+
+### 5. Undoing Changes
+
+- **`git reset`**: Reset changes
+  - `--soft`: Keeps changes staged
+  - `--mixed`: Keeps changes in the working directory
+  - `--hard`: Discards all changes
+
+- **`git revert`**: Safely undo a commit by creating a new one
+  ```bash
+  # Undo last commit but keep changes
+  git reset --soft HEAD~1
+
+  # Revert a commit
+  git revert abc1234
+  ```
+
+---
+
+### 6. Git Configuration
+
+- **Global Config**: Applies to all repos
+  ```bash
+  git config --global user.name "Nikhil"
+  git config --global user.email "nikhil@example.com"
+  ```
+- **Repo-Specific Config**: Applies only to the current repo
+  ```bash
+  git config user.name "ProjectUser"
+  ```
+
+---
+
+### 7. Local vs Remote Repositories
+
+- **Local Repo**: Your working directory + `.git` folder
+- **Remote Repo**: Hosted on GitLab (or similar)
+
+**Diagram:**
+```plaintext
+[Working Directory] <--> [.git Directory] <--> [Remote Repository]
 ```
 
 ---
 
-## Branching and Merging
+### 8. Additional Tips
 
-### `git branch`
-List or create branches.
-```bash
-$ git branch
-```
-*Example:*
-```bash
-$ git branch feature-new
-```
-This creates a branch named `feature-new`.
-
-### `git switch`
-Move between branches.
-```bash
-$ git switch <branch_name>
-```
-*Example:*
-```bash
-$ git switch feature-new
-```
-
-### `git merge`
-Combine changes from one branch with another.
-```bash
-$ git merge <branch_name>
-```
-*Example:*
-```bash
-$ git merge feature-new
-```
-This merges `feature-new` into the current branch.
-
-### `git rebase`
-Reapply commits on top of another branch.
-```bash
-$ git rebase <branch_name>
-```
-*Example:*
-```bash
-$ git rebase main
-```
-This reapplies the current branch's commits on top of `main`.
-
-![Rebase vs Merge](https://via.placeholder.com/800x400.png)
-
-### `git read-tree`
-Read tree structure from another branch or commit.
-```bash
-$ git read-tree <ref>
-```
-*Example:*
-```bash
-$ git read-tree -m -u HEAD
-```
-This updates the working tree with the index contents for branch `HEAD`.
+- Use `.gitignore` to exclude files
+- Use `git tag` to mark releases
+- Use `git fetch` and `git pull` to sync with remote
+- Use `git push` to upload changes
 
 ---
 
-## Advanced Git Techniques
+### 9. Summary
 
-### `git stash`
-Temporarily save changes.
-```bash
-$ git stash
-```
+This guide covers:
+- Git basics and setup
+- Core commands with examples
+- Visual understanding of the Git tree
+- Merge vs Rebase with conflict resolution details
+- Undoing changes safely
+- Configuration and repo structure
 
-### `git reflog`
-View and recover lost commits.
-```bash
-$ git reflog
-```
-
----
-
-*Content expanded to include examples where relevant...*
+*Perfect for onboarding new developers using Git via CLI with GitLab.*
