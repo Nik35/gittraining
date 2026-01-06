@@ -14,29 +14,32 @@ Git is a distributed version control system used to track changes in source code
 
 ---
 
-### 2. Essential Git Commands with Examples
+### 2. Essential Git Commands with Detailed Examples
 
-| **Command**       | **Description**                     | **Example**                    |
-|--------------------|-------------------------------------|---------------------------------|
-| `git init`        | Initialize a new Git repository     | `git init`                     |
-| `git clone`       | Clone a remote repository           | `git clone https://gitlab.com/user/repo.git` |
-| `git status`      | Show the working state of your directory and staged changes | `git status` |
-| `git add`         | Stage changes to be committed       | `git add file.txt`             |
-| `git unstage`     | Remove changes from staging area    | `git restore --staged file.txt`|
-| `git commit`      | Commit staged changes               | `git commit -m "Initial commit"` |
-| `git log`         | View commit history                 | `git log`                      |
-| `git diff`        | Show file differences               | `git diff`                     |
-| `git branch`      | List/create branches                | `git branch feature-x`         |
-| `git switch`      | Switch branches (cleaner than checkout) | `git switch feature-x`    |
-| `git checkout`    | Switch branches (legacy command)    | `git checkout feature-x`       |
-| `git checkout -b` | Create and switch to a new branch   | `git checkout -b new-feature`  |
-| `git merge`       | Merge branches                      | `git merge feature-x`          |
-| `git rebase`      | Reapply commits on top of another base | `git rebase main`              |
-| `git squash`      | Combine multiple commits into one   | Interactive rebase with squash: `git rebase -i HEAD~3` |
-| `git stash`       | Temporarily save changes            | `git stash`                    |
-| `git cherry-pick` | Apply a specific commit to a branch | `git cherry-pick abc1234`      |
-| `git revert`      | Create a new commit to undo changes | `git revert <commit-hash>`     |
-| `git reset`       | Undo commits (soft/mixed/hard)      | `git reset --soft HEAD~1`      |
+This section provides detailed explanations and real-world examples of popular Git commands. Each command is shown in scenarios that developers often encounter.
+
+| **Command**       | **Description**                                                                                                                                                                         | **Example**                                                 |
+|--------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------|
+| `git init`        | Initialize a new Git repository in your project folder. This adds a `.git` directory that tracks your changes.                                                                  | `git init` inside a project folder. Default branch: `main`. |
+| `git clone`       | Clone (download) a remote repository to your local machine. It includes all history.                                                                                                 | `git clone https://github.com/user/repo.git`                |
+| `git status`      | Show the current state of your repository, including staged, unstaged, and untracked files.                                                                                          | Run `git status` to check for files with pending changes.   |
+| `git add`         | Stage files for the next commit. Staged files will be included when you run the `git commit` command.                                                                                | Stage individual files: `git add file1.js`.                |
+| `git restore --staged` | Unstage a file previously added using `git add`.                                                                                                                                 | `git restore --staged file.js` (unstages the file).         |
+| `git commit`      | Save staged changes, creating a snapshot (commit) in Git history, with a unique ID (SHA).                                                                                           | Commit staged files: `git commit -m "Add login feature"`. |
+| `git log`         | View the history of commits. You can use options to customize logs.                                                                                                                 | `git log --oneline --graph` for a summary.                 |
+| `git diff`        | Show differences between files. Useful to verify changes before staging.                                                                                                           | `git diff HEAD` to compare changes since the last commit.   |
+| `git branch`      | View current branches or create a new one.                                                                                                                                          | List branches: `git branch`.                                |
+| `git switch`      | Switch or create a new branch. This is simpler than older alternatives.                                                                                                              | Switch branches: `git switch feature-x`.                   |
+| `git checkout`    | Switch branches or restore files. It works similarly to `git switch`, but has additional use cases in older Git versions.                                                           | Switch branches: `git checkout feature-x`.                 |
+| `git checkout <hash>` | Check out a specific commit by its hash value (non-destructive).                                                                                                                | `git checkout abc1234`                                      |
+| `git checkout -b` | Create and move to a new branch simultaneously.                                                                                                                                      | `git checkout -b test-branch`.                             |
+| `git merge`       | Combine another branch's history into your current branch.                                                                                                                          | Merge feature branch: `git merge feature-x`.               |
+| `git rebase`      | Replay commits from one branch onto another to create a linear history.                                                                                                             | `git rebase main`. Resolves conflicts interactively.        |
+| `git stash`       | Temporarily save changes in the working directory for a clean slate.                                                                                                                | Use `git stash` before switching branches.                 |
+| `git stash pop`   | Apply previously stashed changes.                                                                                                                                                    | `git stash pop`.                                            |
+| `git cherry-pick` | Apply a specific commit from another branch to your current branch.                                                                                                                | `git cherry-pick ff612h83`.                                |
+| `git revert`      | Undo specific commits by creating new ones.                                                                                                                                        | `git revert HEAD`.                                          |
+| `git reset HEAD~1`| Undo your last commit without losing changes to files.                                                                                                                              | Discard last commit: `git reset --soft HEAD~1`.            |
 
 ---
 
@@ -55,133 +58,114 @@ main
 
 ---
 
-### 4. Merge vs Rebase
+### 4. Merge vs Rebase Explained with Examples
 
 - **Merge**: Combines histories, creates a merge commit.
+  Used when multiple developers work in parallel and it's essential to preserve everyone’s history.
   ```bash
   git merge feature-x
   ```
+
 - **Rebase**: Rewrites history, applies commits on top of another branch.
+  Suitable for keeping histories clean during development.
   ```bash
   git rebase main
   ```
 
-#### When to Use:
-- Use **merge** for preserving history.
-- Use **rebase** for a cleaner, linear history.
-
 #### Conflict Example and Resolution:
-When both branches modify the same line or conflicting changes exist, Git will pause the rebase or merge and mark the conflicted files.
-
-1. To resolve conflicts during a rebase:
-   - Open the conflicted file(s).
-   - Manually edit the conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`) to resolve the differences.
-   - Stage the resolved files: `git add <conflicted-file>`
-   - Continue the rebase process: `git rebase --continue`
-   - If you want to abort the rebase and return to the original state: `git rebase --abort`
-
-2. For merge conflicts, the process is similar:
-   - Resolve conflicts manually in the files.
-   - Stage the resolved files with `git add`.
-   - Complete the merge with: `git commit`
-
-*Always review the changes carefully before continuing.*
+When both branches modify the same file:
+```bash
+# Resolve conflicts manually
+<<<<<<< HEAD
+Your changes...
+=======
+Incoming changes...
+>>>>>>> feature-x
+```
+Use `git add <filename>` and continue the process.
 
 ---
 
-### 5. Git Internals: Commit Unique ID Explained
+### 5. Working with Specific Commits
 
-Each commit has a unique ID known as a hash. This SHA-1 hash ensures the uniqueness of all commits and helps in identifying them. The hash is created using the commit's content, timestamp, and parent commit.
-
----
-
-### 6. Undoing Changes
-
-- **`git reset`**: Reset changes
-  - `--soft`: Keeps changes staged
-  - `--mixed`: Keeps changes in the working directory
-  - `--hard`: Discards all changes
-
-- **`git revert`**: Safely undo a commit by creating a new one
+- **Check out a specific commit**
   ```bash
-  # Undo last commit but keep changes
-  git reset --soft HEAD~1
+  git checkout <commit-hash>
+  ```
+  This command switches your working directory to the state at that commit. Use this for debugging or temporarily reviewing distant history.
 
-  # Revert a commit
-  git revert abc1234
+- **Restore a file from a specific commit**
+  Restore file `index.html` from commit `abc1234` into the current branch:
+  ```bash
+  git checkout abc1234 -- index.html
   ```
 
 ---
 
-### 7. Git Squash & Cherry-Pick
+### 6. Git Squash & Cherry-Pick
 
 - **Squashing Commits**:
-  Combine multiple commits into one to clean up your branch history.
+  Use squashing to make your history cleaner. Squashing is useful during pull request preparation or before merging a feature branch.
   ```bash
   git rebase -i HEAD~n
-  # Mark commits as squash (s) except the first one
-  # Save and close editor to apply
+  # Mark commits as 'squash (s)' except the first one
   ```
 
-- **Cherry-Picking**:
-  Introduce changes from a specific commit into another branch without merging entire branch histories.
+- **Cherry-Picking a Commit**:
+  Apply a beneficial commit from one branch into another without merging branch histories.
   ```bash
   git cherry-pick <commit-hash>
   ```
 
 ---
 
-### 8. Git Configuration and Author Details
+### 7. Git Configuration
 
 - **Check Commit Author**:
-  To verify the author of a commit:
   ```bash
   git log --pretty=format:'%h %an %ae %s'
   ```
+  This shows the author name and email for each commit.
 
-- **Global Config**: Applies to all repos
+- **Updating Global or Local Usernames**: Save your information globally or per repository:
   ```bash
-  git config --global user.name "Nikhil"
-  git config --global user.email "nikhil@example.com"
-  ```
-- **Repo-Specific Config**: Applies only to the current repo
-  ```bash
-  git config user.name "ProjectUser"
+  git config --global user.name "John Doe"
+  git config --global user.email "john@example.com"
   ```
 
 ---
 
-### 9. Git Checkout vs Switch
+### 8. Git Checkout vs Switch
 
-The `git switch` command was introduced as a simpler alternative to `git checkout`.
+The `git switch` command was introduced as a simpler alternative to `git checkout` for branch operations.
 
-- **Switch Branches**:
-  ```bash
-  git switch feature-x  # Switch to an existing branch
-  git checkout feature-x  # Equivalent legacy command
-  ```
-- **Create & Switch to a New Branch**:
-  ```bash
-  git switch -c new-feature  # New command
-  git checkout -b new-feature  # Equivalent legacy command
-  ```
-
+#### Key Differences:
 | **Command**        | **Advantages**                  |
 |---------------------|---------------------------------|
-| `git switch`       | Cleaner, intuitive             |
-| `git checkout`     | Supports other actions (e.g. checking out a file) |
+| `git switch`       | Cleaner, specific to switching branches.             |
+| `git checkout`     | Supports file-level checkouts alongside branch switching. |
+
+#### Examples of Use:
+- **Switch to Branch**:
+  ```bash
+  git switch main
+  git checkout main
+  ```
+- **Create a New Branch**:
+  ```bash
+  git switch -c new-feature
+  git checkout -b new-feature
+  ```
 
 ---
 
-### 10. Summary
+### 9. Summary
 
-This guide covers:
-- Git basics and setup
-- Core commands with examples, including new ones like `git switch`
-- Git internals like commit hashing and unique IDs
-- Merge vs Rebase with conflict resolution details
-- Advanced use cases: squashing commits, cherry-picking
-- Configuration and author checks
-- The difference between `switch` and `checkout`
+This guide extensively covers:
+- Git commands with real-world examples.
+- Selecting the right commands (`switch` vs `checkout`, etc.).
+- Handling specific scenarios like cherry-picking, squashing commits.
+- Checking out and restoring files from specific commits.
+- Understanding Git workflows (merge/rebase).
 
-*Perfect for onboarding new developers using Git via CLI with GitLab.*
+*Perfect for onboarding developers.*
