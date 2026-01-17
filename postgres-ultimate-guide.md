@@ -1230,28 +1230,1801 @@ SELECT * FROM cache_stats_summary;
 - **Further Reading**: [PostgreSQL Resource Consumption](https://www.postgresql.org/docs/18/runtime-config-resource.html) | [pg_buffercache](https://www.postgresql.org/docs/18/pgbuffercache.html) | [pg_prewarm](https://www.postgresql.org/docs/18/pgprewarm.html)
 
 ## 5. Transactions
-Transactions ensure a sequence of database operations is executed in a coherent way.
 
-- **Example**: `BEGIN; INSERT INTO my_table VALUES (1); COMMIT;`
-- **Further Reading**: [PostgreSQL Transactions Documentation](https://www.postgresql.org/docs/18/sql-begin.html)
+### Overview
+Transactions are the cornerstone of database reliability, ensuring that a sequence of operations either completes entirely or has no effect at all. PostgreSQL implements transactions using MVCC (Multi-Version Concurrency Control), providing high concurrency without locking readers.
+
+### ACID Properties
+
+PostgreSQL guarantees ACID properties for all transactions:
+
+```
+┌────────────────────────────────────────────────────────────┐
+│                    ACID Properties                         │
+├────────────────────────────────────────────────────────────┤
+│ A - Atomicity:   All or nothing execution                 │
+│ C - Consistency: Database rules are never violated        │
+│ I - Isolation:   Concurrent transactions don't interfere  │
+│ D - Durability:  Committed changes survive crashes        │
+└────────────────────────────────────────────────────────────┘
+```
+
+### Basic Transaction Operations
+
+```sql
+-- Start a transaction
+BEGIN;
+-- Or: START TRANSACTION;
+
+-- Perform operations
+INSERT INTO accounts (user_id, balance) VALUES (1, 1000.00);
+UPDATE accounts SET balance = balance - 100 WHERE user_id = 1;
+UPDATE accounts SET balance = balance + 100 WHERE user_id = 2;
+
+-- Commit the transaction (make changes permanent)
+COMMIT;
+
+-- Or rollback (undo all changes)
+ROLLBACK;
+```
+
+#### Savepoints
+```sql
+BEGIN;
+
+INSERT INTO orders (customer_id, total) VALUES (123, 500.00);
+
+-- Create a savepoint
+SAVEPOINT order_items;
+
+INSERT INTO order_items (order_id, product_id, quantity) VALUES (1, 10, 2);
+INSERT INTO order_items (order_id, product_id, quantity) VALUES (1, 20, 1);
+
+-- Oops, need to undo item inserts
+ROLLBACK TO SAVEPOINT order_items;
+
+-- Continue with different items
+INSERT INTO order_items (order_id, product_id, quantity) VALUES (1, 15, 3);
+
+COMMIT;
+```
+
+### Transaction Isolation Levels
+
+PostgreSQL supports four isolation levels defined by SQL standard (though READ UNCOMMITTED behaves like READ COMMITTED).
+
+```sql
+-- View current isolation level
+SHOW transaction_isolation;
+
+-- Set isolation level for current transaction
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+
+-- Set default for session
+SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+```
+
+#### Isolation Level Comparison
+
+```
+┌──────────────────────┬─────────────┬─────────────┬──────────────┐
+│ Isolation Level      │ Dirty Read  │ Non-Repeat  │ Phantom Read │
+├──────────────────────┼─────────────┼─────────────┼──────────────┤
+│ READ UNCOMMITTED*    │ No (PG)     │ Possible    │ Possible     │
+│ READ COMMITTED       │ No          │ Possible    │ Possible     │
+│ REPEATABLE READ      │ No          │ No          │ No (PG)**    │
+│ SERIALIZABLE         │ No          │ No          │ No           │
+└──────────────────────┴─────────────┴─────────────┴──────────────┘
+* PostgreSQL treats READ UNCOMMITTED as READ COMMITTED
+** PostgreSQL's REPEATABLE READ prevents phantoms (stronger than SQL standard)
+```
+
+#### READ COMMITTED (Default)
+```sql
+-- Session 1
+BEGIN;
+SELECT balance FROM accounts WHERE user_id = 1;  -- Returns 1000
+
+-- Session 2
+UPDATE accounts SET balance = 1500 WHERE user_id = 1;
+COMMIT;
+
+-- Session 1 (continued)
+SELECT balance FROM accounts WHERE user_id = 1;  -- Returns 1500 (changed!)
+COMMIT;
+```
+
+**Characteristics**:
+- Sees committed changes from other transactions
+- Each statement sees a fresh snapshot
+- Most commonly used isolation level
+
+#### REPEATABLE READ
+```sql
+-- Session 1
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+SELECT balance FROM accounts WHERE user_id = 1;  -- Returns 1000
+
+-- Session 2
+UPDATE accounts SET balance = 1500 WHERE user_id = 1;
+COMMIT;
+
+-- Session 1 (continued)
+SELECT balance FROM accounts WHERE user_id = 1;  -- Still returns 1000
+COMMIT;
+```
+
+**Characteristics**:
+- Sees a consistent snapshot from transaction start
+- Protects against non-repeatable reads
+- Can fail with serialization errors on conflicts
+
+#### SERIALIZABLE
+```sql
+-- Session 1
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+SELECT SUM(balance) FROM accounts WHERE account_type = 'checking';  -- Returns 10000
+
+-- Session 2
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+INSERT INTO accounts (account_type, balance) VALUES ('checking', 500);
+COMMIT;
+
+-- Session 1 (continued)
+INSERT INTO audit_log (total_balance) 
+    VALUES ((SELECT SUM(balance) FROM accounts WHERE account_type = 'checking'));
+COMMIT;  -- ERROR: could not serialize access due to read/write dependencies
+```
+
+**Characteristics**:
+- Strongest isolation level
+- Prevents all anomalies
+- Uses predicate locking (Serializable Snapshot Isolation)
+- May cause more serialization failures
+
+### MVCC (Multi-Version Concurrency Control)
+
+PostgreSQL's MVCC implementation allows high concurrency by keeping multiple versions of rows.
+
+#### How MVCC Works
+
+```
+┌────────────────────────────────────────────────────────────┐
+│                    MVCC Row Versioning                     │
+├────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Transaction 100: UPDATE users SET name = 'Alice'          │
+│  ┌─────────────────────────────────────────────────────┐  │
+│  │ Old Version (visible to txn < 100)                  │  │
+│  │ xmin: 50  xmax: 100  name: 'Bob'                    │  │
+│  └─────────────────────────────────────────────────────┘  │
+│  ┌─────────────────────────────────────────────────────┐  │
+│  │ New Version (visible to txn >= 100)                 │  │
+│  │ xmin: 100  xmax: 0  name: 'Alice'                   │  │
+│  └─────────────────────────────────────────────────────┘  │
+│                                                             │
+└────────────────────────────────────────────────────────────┘
+```
+
+#### Hidden System Columns
+```sql
+-- View system columns (PostgreSQL adds these to every row)
+SELECT 
+    xmin,          -- Transaction ID that inserted this row
+    xmax,          -- Transaction ID that deleted/updated this row (0 if current)
+    cmin,          -- Command ID within inserting transaction
+    cmax,          -- Command ID within deleting transaction
+    ctid,          -- Physical location of row
+    *
+FROM accounts;
+
+-- Example output:
+-- xmin  | xmax | cmin | cmax | ctid  | user_id | balance
+-- ------+------+------+------+-------+---------+---------
+-- 1234  |    0 |    0 |    0 | (0,1) |       1 | 1000.00
+```
+
+#### Visibility Rules
+```sql
+-- A row version is visible to transaction T if:
+-- 1. xmin is committed and xmin < T
+-- 2. xmax is 0 OR (xmax is not committed OR xmax >= T)
+
+-- Check transaction ID
+SELECT txid_current();
+
+-- Check if transaction is in progress
+SELECT txid_current_if_assigned();
+
+-- Transaction ID status
+SELECT txid_status(12345);  -- committed, aborted, or in progress
+```
+
+### Transaction Management
+
+#### Long-Running Transactions
+```sql
+-- Monitor long-running transactions
+SELECT 
+    pid,
+    now() - xact_start AS duration,
+    state,
+    query,
+    wait_event_type,
+    wait_event
+FROM pg_stat_activity
+WHERE state != 'idle'
+    AND xact_start IS NOT NULL
+ORDER BY xact_start
+LIMIT 10;
+
+-- Kill a long-running transaction
+SELECT pg_cancel_backend(pid);    -- Gentle cancellation
+SELECT pg_terminate_backend(pid); -- Forceful termination
+
+-- Long transactions are problematic because:
+-- 1. Block VACUUM from cleaning up dead tuples
+-- 2. Increase table bloat
+-- 3. Can cause transaction ID wraparound issues
+```
+
+#### Transaction ID Management
+```sql
+-- Current transaction ID
+SELECT txid_current();
+
+-- Transaction ID usage
+SELECT 
+    datname,
+    age(datfrozenxid) as xid_age,
+    pg_size_pretty(pg_database_size(datname)) as size
+FROM pg_database
+ORDER BY age(datfrozenxid) DESC;
+
+-- Check for wraparound danger (age > 200 million is concerning)
+SELECT 
+    datname,
+    age(datfrozenxid),
+    CASE 
+        WHEN age(datfrozenxid) > 1000000000 THEN 'CRITICAL'
+        WHEN age(datfrozenxid) > 200000000 THEN 'WARNING'
+        ELSE 'OK'
+    END as status
+FROM pg_database
+ORDER BY age(datfrozenxid) DESC;
+```
+
+#### Prepared Transactions (Two-Phase Commit)
+```sql
+-- Prepare a transaction for commit
+BEGIN;
+UPDATE accounts SET balance = balance - 100 WHERE user_id = 1;
+PREPARE TRANSACTION 'payment_tx_001';
+
+-- Later, commit or rollback the prepared transaction
+COMMIT PREPARED 'payment_tx_001';
+-- Or: ROLLBACK PREPARED 'payment_tx_001';
+
+-- View prepared transactions
+SELECT * FROM pg_prepared_xacts;
+
+-- Configuration
+max_prepared_transactions = 100  -- postgresql.conf
+```
+
+### Advanced Transaction Patterns
+
+#### Optimistic Locking
+```sql
+-- Add version column
+ALTER TABLE accounts ADD COLUMN version INTEGER DEFAULT 1;
+
+-- Application-level optimistic locking
+BEGIN;
+
+SELECT balance, version FROM accounts WHERE user_id = 1;
+-- balance: 1000, version: 5
+
+-- Try to update with version check
+UPDATE accounts 
+SET balance = balance - 100, version = version + 1
+WHERE user_id = 1 AND version = 5;
+
+-- If UPDATE returns 0 rows, someone else modified it
+-- Application should retry or abort
+
+COMMIT;
+```
+
+#### Advisory Locks
+```sql
+-- Session-level advisory lock
+SELECT pg_advisory_lock(12345);
+-- Critical section
+SELECT pg_advisory_unlock(12345);
+
+-- Transaction-level advisory lock
+BEGIN;
+SELECT pg_advisory_xact_lock(12345);
+-- Work
+COMMIT;  -- Lock automatically released
+
+-- Try lock (non-blocking)
+SELECT pg_try_advisory_lock(12345);  -- Returns true/false
+
+-- Check held advisory locks
+SELECT 
+    locktype,
+    objid,
+    mode,
+    granted,
+    pid
+FROM pg_locks
+WHERE locktype = 'advisory';
+```
+
+#### Deferred Constraints
+```sql
+-- Create deferrable constraint
+CREATE TABLE parent (
+    id INTEGER PRIMARY KEY
+);
+
+CREATE TABLE child (
+    id INTEGER PRIMARY KEY,
+    parent_id INTEGER,
+    FOREIGN KEY (parent_id) REFERENCES parent(id)
+        DEFERRABLE INITIALLY DEFERRED
+);
+
+-- Within transaction, constraint checked at COMMIT
+BEGIN;
+INSERT INTO child (id, parent_id) VALUES (1, 10);  -- parent_id 10 doesn't exist yet
+INSERT INTO parent (id) VALUES (10);                 -- Now it exists
+COMMIT;  -- Succeeds because constraint checked at end
+
+-- Set constraint checking mode
+SET CONSTRAINTS ALL IMMEDIATE;
+SET CONSTRAINTS ALL DEFERRED;
+```
+
+### Transaction Performance
+
+#### Monitoring Transaction Activity
+```sql
+-- Transaction throughput
+SELECT 
+    datname,
+    xact_commit,
+    xact_rollback,
+    xact_commit + xact_rollback as total_xacts,
+    round(xact_rollback::numeric / NULLIF(xact_commit + xact_rollback, 0) * 100, 2) as rollback_ratio
+FROM pg_stat_database
+WHERE datname NOT IN ('template0', 'template1')
+ORDER BY total_xacts DESC;
+
+-- Commits per second
+SELECT 
+    (xact_commit - lag(xact_commit) OVER (ORDER BY stats_reset))::float / 
+    EXTRACT(EPOCH FROM (stats_reset - lag(stats_reset) OVER (ORDER BY stats_reset)))
+    as commits_per_second
+FROM pg_stat_database
+WHERE datname = current_database();
+
+-- Blocking transactions
+SELECT 
+    blocked_locks.pid AS blocked_pid,
+    blocked_activity.usename AS blocked_user,
+    blocking_locks.pid AS blocking_pid,
+    blocking_activity.usename AS blocking_user,
+    blocked_activity.query AS blocked_statement,
+    blocking_activity.query AS blocking_statement,
+    blocked_activity.application_name AS blocked_application
+FROM pg_catalog.pg_locks blocked_locks
+JOIN pg_catalog.pg_stat_activity blocked_activity ON blocked_activity.pid = blocked_locks.pid
+JOIN pg_catalog.pg_locks blocking_locks 
+    ON blocking_locks.locktype = blocked_locks.locktype
+    AND blocking_locks.database IS NOT DISTINCT FROM blocked_locks.database
+    AND blocking_locks.relation IS NOT DISTINCT FROM blocked_locks.relation
+    AND blocking_locks.pid != blocked_locks.pid
+JOIN pg_catalog.pg_stat_activity blocking_activity ON blocking_activity.pid = blocking_locks.pid
+WHERE NOT blocked_locks.granted;
+```
+
+#### Transaction Best Practices
+
+1. **Keep Transactions Short**: Long transactions block VACUUM and cause bloat
+```sql
+-- Bad: Long-running transaction
+BEGIN;
+SELECT pg_sleep(300);  -- 5 minutes!
+UPDATE accounts SET balance = balance + 10 WHERE user_id = 1;
+COMMIT;
+
+-- Good: Short transaction
+BEGIN;
+UPDATE accounts SET balance = balance + 10 WHERE user_id = 1;
+COMMIT;
+```
+
+2. **Avoid Mixing DDL and DML**: DDL takes strong locks
+```sql
+-- Better to separate these
+BEGIN;
+ALTER TABLE users ADD COLUMN email_verified BOOLEAN DEFAULT false;
+COMMIT;
+
+BEGIN;
+UPDATE users SET email_verified = true WHERE email IS NOT NULL;
+COMMIT;
+```
+
+3. **Use Appropriate Isolation Levels**
+```sql
+-- Use READ COMMITTED for most OLTP workloads
+-- Use REPEATABLE READ for reports requiring consistency
+-- Use SERIALIZABLE only when necessary (higher conflict rate)
+```
+
+4. **Handle Serialization Failures**
+```python
+# Python example with retry logic
+import psycopg2
+from psycopg2 import extensions
+
+def execute_with_retry(conn, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            cursor = conn.cursor()
+            cursor.execute("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            # Your operations here
+            cursor.execute("UPDATE accounts SET balance = balance - 100 WHERE user_id = 1")
+            cursor.execute("UPDATE accounts SET balance = balance + 100 WHERE user_id = 2")
+            conn.commit()
+            return True
+        except psycopg2.extensions.TransactionRollbackError:
+            conn.rollback()
+            if attempt == max_retries - 1:
+                raise
+            # Retry with exponential backoff
+            time.sleep(0.1 * (2 ** attempt))
+    return False
+```
+
+### Practical Examples
+
+#### Bank Transfer (Money Transfer Pattern)
+```sql
+-- Atomic money transfer between accounts
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+
+-- Lock accounts in consistent order to prevent deadlocks
+SELECT balance FROM accounts 
+WHERE user_id IN (1, 2) 
+ORDER BY user_id 
+FOR UPDATE;
+
+-- Check sufficient balance
+SELECT balance FROM accounts WHERE user_id = 1;
+-- Application checks: balance >= 100
+
+-- Perform transfer
+UPDATE accounts SET balance = balance - 100 WHERE user_id = 1;
+UPDATE accounts SET balance = balance + 100 WHERE user_id = 2;
+
+-- Log the transfer
+INSERT INTO transfer_log (from_user, to_user, amount, timestamp)
+VALUES (1, 2, 100, NOW());
+
+COMMIT;
+```
+
+#### Inventory Management
+```sql
+-- Reserve inventory with optimistic locking
+BEGIN;
+
+-- Read current quantity with lock
+SELECT quantity, version 
+FROM inventory 
+WHERE product_id = 123 
+FOR UPDATE;
+
+-- Check availability
+-- quantity: 50, version: 10
+
+-- Reserve items
+UPDATE inventory 
+SET quantity = quantity - 5,
+    version = version + 1
+WHERE product_id = 123 
+    AND version = 10
+    AND quantity >= 5;
+
+GET DIAGNOSTICS rows_affected = ROW_COUNT;
+
+IF rows_affected = 0 THEN
+    ROLLBACK;
+    -- Handle conflict (item sold out or version mismatch)
+ELSE
+    COMMIT;
+END IF;
+```
+
+- **Further Reading**: [PostgreSQL Transactions](https://www.postgresql.org/docs/18/tutorial-transactions.html) | [Transaction Isolation](https://www.postgresql.org/docs/18/transaction-iso.html) | [MVCC](https://www.postgresql.org/docs/18/mvcc.html) | [Explicit Locking](https://www.postgresql.org/docs/18/explicit-locking.html)
 
 ## 6. Large Object Storage
-PostgreSQL supports storing and manipulating large objects using the `lo` module.
 
-- **Example**: `SELECT lo_open(large_object_id, 131072);`
-- **Further Reading**: [PostgreSQL Large Object Documentation](https://www.postgresql.org/docs/18/largeobjects.html)
+### Overview
+PostgreSQL provides two mechanisms for storing large binary data: Large Objects (LOB) and BYTEA columns. Each has distinct characteristics, use cases, and trade-offs.
+
+### Large Objects vs BYTEA
+
+```
+┌─────────────────────┬──────────────────────┬─────────────────────┐
+│ Feature             │ Large Objects (LOB)  │ BYTEA Column        │
+├─────────────────────┼──────────────────────┼─────────────────────┤
+│ Max Size            │ 4TB (2GB per chunk)  │ 1GB (TOAST limit)   │
+│ Storage             │ Separate system      │ In table (TOASTed)  │
+│ Streaming Access    │ Yes                  │ No (all or nothing) │
+│ Random Access       │ Yes (seek support)   │ No                  │
+│ Permissions         │ Row-level only       │ Full SQL control    │
+│ VACUUM Impact       │ Separate cleanup     │ Normal VACUUM       │
+│ Backup/Restore      │ Requires --blobs     │ Automatic           │
+│ Transaction Safety  │ Yes                  │ Yes                 │
+└─────────────────────┴──────────────────────┴─────────────────────┘
+```
+
+### Large Object API
+
+#### Creating and Using Large Objects
+
+```sql
+-- Create a large object (returns OID)
+SELECT lo_create(0);  -- 0 = auto-assign OID
+-- Returns: 16385
+
+-- Import file to large object
+SELECT lo_import('/path/to/file.pdf');
+-- Returns: 16386
+
+-- Create table to reference large objects
+CREATE TABLE documents (
+    id SERIAL PRIMARY KEY,
+    filename VARCHAR(255),
+    mime_type VARCHAR(100),
+    content_oid OID,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Insert reference to large object
+INSERT INTO documents (filename, mime_type, content_oid)
+VALUES ('report.pdf', 'application/pdf', 16386);
+```
+
+#### Reading Large Objects
+
+```sql
+-- Open large object for reading (mode 262144 = INV_READ)
+SELECT lo_open(16386, 262144);
+-- Returns file descriptor: 0
+
+-- Read from large object
+SELECT lo_read(0, 1024);  -- Read 1024 bytes from fd 0
+-- Returns bytea data
+
+-- Seek to position
+SELECT lo_lseek(0, 1000, 0);  -- Seek to byte 1000 (SEEK_SET = 0)
+
+-- Get current position
+SELECT lo_tell(0);
+
+-- Close large object
+SELECT lo_close(0);
+
+-- Export large object to file
+SELECT lo_export(16386, '/path/to/output.pdf');
+
+-- Get large object size
+SELECT lo_get(16386);  -- Returns NULL if doesn't exist
+```
+
+#### Writing to Large Objects
+
+```sql
+-- Create new large object
+SELECT lo_create(0) AS new_oid \gset
+
+-- Open for writing (mode 131072 = INV_WRITE)
+SELECT lo_open(:new_oid, 131072) AS fd \gset
+
+-- Write data
+SELECT lo_write(:fd, '\xDEADBEEF'::bytea);
+
+-- Close
+SELECT lo_close(:fd);
+
+-- Or use lowrite for positioned writes
+SELECT lo_open(:new_oid, 393216) AS fd \gset  -- INV_READ | INV_WRITE
+SELECT lo_lseek(:fd, 1000, 0);  -- Seek to position
+SELECT lo_write(:fd, 'Some text'::bytea);
+SELECT lo_close(:fd);
+```
+
+#### Deleting Large Objects
+
+```sql
+-- Delete a large object
+SELECT lo_unlink(16386);
+
+-- Clean up orphaned large objects (no table references)
+-- First, create a function to find orphans
+CREATE OR REPLACE FUNCTION find_orphaned_large_objects()
+RETURNS TABLE(oid OID) AS $$
+    SELECT lo.oid
+    FROM pg_largeobject_metadata lo
+    LEFT JOIN documents d ON lo.oid = d.content_oid
+    WHERE d.content_oid IS NULL;
+$$ LANGUAGE SQL;
+
+-- View orphaned large objects
+SELECT * FROM find_orphaned_large_objects();
+
+-- Delete orphaned large objects
+SELECT lo_unlink(oid) FROM find_orphaned_large_objects();
+
+-- Use vacuumlo utility (command line)
+-- vacuumlo -v -n database_name  -- Dry run
+-- vacuumlo -v database_name     -- Actually delete
+```
+
+### Large Object Permissions
+
+```sql
+-- Grant access to specific large object
+SELECT lo_open(16386, 262144);  -- Will fail if no permission
+
+-- Create large object with specific permissions
+-- Note: Permissions are limited - typically manage at row level
+
+-- Better approach: Use table-level permissions
+GRANT SELECT ON documents TO readonly_user;
+GRANT INSERT, UPDATE, DELETE ON documents TO editor_user;
+```
+
+### BYTEA Columns
+
+#### Creating and Using BYTEA
+
+```sql
+-- Create table with BYTEA column
+CREATE TABLE files (
+    id SERIAL PRIMARY KEY,
+    filename VARCHAR(255),
+    mime_type VARCHAR(100),
+    content BYTEA,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Insert binary data
+INSERT INTO files (filename, mime_type, content)
+VALUES ('logo.png', 'image/png', pg_read_binary_file('/path/to/logo.png'));
+
+-- Or insert with escape format
+INSERT INTO files (filename, mime_type, content)
+VALUES ('data.bin', 'application/octet-stream', '\xDEADBEEF'::bytea);
+
+-- Select data (hex format by default)
+SELECT encode(content, 'hex') FROM files WHERE id = 1;
+
+-- Select as base64
+SELECT encode(content, 'base64') FROM files WHERE id = 1;
+
+-- Get size
+SELECT filename, pg_size_pretty(length(content)) as size
+FROM files;
+```
+
+#### TOAST (The Oversized-Attribute Storage Technique)
+
+PostgreSQL automatically uses TOAST for large BYTEA values.
+
+```sql
+-- TOAST compresses and stores large values externally
+-- Check TOAST statistics
+SELECT 
+    schemaname,
+    tablename,
+    pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) as total_size,
+    pg_size_pretty(pg_relation_size(schemaname||'.'||tablename)) as table_size,
+    pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename) - 
+                   pg_relation_size(schemaname||'.'||tablename)) as toast_size
+FROM pg_tables
+WHERE schemaname = 'public'
+ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC;
+
+-- Configure TOAST behavior
+ALTER TABLE files ALTER COLUMN content SET STORAGE EXTENDED;  -- Compress + external (default)
+-- Options: PLAIN, EXTERNAL, EXTENDED, MAIN
+
+-- EXTENDED: Compress, then move to TOAST if still large
+-- MAIN: Compress, prefer inline
+-- EXTERNAL: No compression, move to TOAST
+-- PLAIN: No compression, always inline (not for BYTEA)
+```
+
+### Practical Examples
+
+#### Document Management System with Large Objects
+
+```sql
+-- Schema for document management
+CREATE TABLE documents (
+    id SERIAL PRIMARY KEY,
+    title VARCHAR(255) NOT NULL,
+    description TEXT,
+    mime_type VARCHAR(100),
+    file_oid OID NOT NULL,
+    file_size BIGINT,
+    uploaded_by INTEGER REFERENCES users(id),
+    uploaded_at TIMESTAMP DEFAULT NOW(),
+    version INTEGER DEFAULT 1
+);
+
+-- Function to upload document
+CREATE OR REPLACE FUNCTION upload_document(
+    p_title VARCHAR,
+    p_description TEXT,
+    p_mime_type VARCHAR,
+    p_data BYTEA,
+    p_user_id INTEGER
+) RETURNS INTEGER AS $$
+DECLARE
+    v_oid OID;
+    v_fd INTEGER;
+    v_doc_id INTEGER;
+BEGIN
+    -- Create large object
+    SELECT lo_create(0) INTO v_oid;
+    
+    -- Open for writing
+    SELECT lo_open(v_oid, 131072) INTO v_fd;
+    
+    -- Write data
+    PERFORM lo_write(v_fd, p_data);
+    
+    -- Close
+    PERFORM lo_close(v_fd);
+    
+    -- Insert document record
+    INSERT INTO documents (title, description, mime_type, file_oid, file_size, uploaded_by)
+    VALUES (p_title, p_description, p_mime_type, v_oid, length(p_data), p_user_id)
+    RETURNING id INTO v_doc_id;
+    
+    RETURN v_doc_id;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function to download document
+CREATE OR REPLACE FUNCTION download_document(p_doc_id INTEGER)
+RETURNS BYTEA AS $$
+DECLARE
+    v_oid OID;
+    v_fd INTEGER;
+    v_data BYTEA;
+BEGIN
+    -- Get large object OID
+    SELECT file_oid INTO v_oid FROM documents WHERE id = p_doc_id;
+    
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Document not found';
+    END IF;
+    
+    -- Open for reading
+    SELECT lo_open(v_oid, 262144) INTO v_fd;
+    
+    -- Read all data (for large files, read in chunks)
+    SELECT string_agg(chunk, ''::bytea)
+    INTO v_data
+    FROM (
+        SELECT lo_read(v_fd, 8192) as chunk
+        FROM generate_series(1, 1000)  -- Adjust for file size
+        WHERE lo_read(v_fd, 0) IS NOT NULL
+    ) chunks;
+    
+    -- Close
+    PERFORM lo_close(v_fd);
+    
+    RETURN v_data;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Cleanup trigger for large objects
+CREATE OR REPLACE FUNCTION cleanup_large_object()
+RETURNS TRIGGER AS $$
+BEGIN
+    PERFORM lo_unlink(OLD.file_oid);
+    RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER document_cleanup
+BEFORE DELETE ON documents
+FOR EACH ROW
+EXECUTE FUNCTION cleanup_large_object();
+```
+
+#### Image Storage with BYTEA
+
+```sql
+-- Schema for image storage
+CREATE TABLE images (
+    id SERIAL PRIMARY KEY,
+    filename VARCHAR(255),
+    thumbnail BYTEA,        -- Small, inline
+    full_image BYTEA,       -- Large, TOASTed
+    width INTEGER,
+    height INTEGER,
+    mime_type VARCHAR(50),
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Set storage strategy
+ALTER TABLE images ALTER COLUMN thumbnail SET STORAGE MAIN;      -- Keep inline
+ALTER TABLE images ALTER COLUMN full_image SET STORAGE EXTENDED;  -- Compress + TOAST
+
+-- Insert image
+INSERT INTO images (filename, thumbnail, full_image, width, height, mime_type)
+VALUES (
+    'photo.jpg',
+    decode('FFD8FFE0...', 'hex'),  -- Small thumbnail
+    pg_read_binary_file('/path/to/photo.jpg'),
+    1920,
+    1080,
+    'image/jpeg'
+);
+
+-- Efficient query (only fetch thumbnail)
+SELECT id, filename, thumbnail FROM images WHERE id = 1;
+
+-- Query with image metadata only (no binary data)
+SELECT id, filename, width, height, 
+       pg_size_pretty(length(full_image)) as size
+FROM images;
+```
+
+### Performance Considerations
+
+#### Comparing Performance
+
+```sql
+-- Benchmark BYTEA vs Large Objects
+-- BYTEA: Simpler, better for small-medium files (< 100MB)
+-- Large Objects: Better for very large files, streaming access
+
+-- Monitor table bloat
+SELECT 
+    schemaname,
+    tablename,
+    pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) as total,
+    pg_size_pretty(pg_relation_size(schemaname||'.'||tablename)) as table,
+    pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename) - 
+                   pg_relation_size(schemaname||'.'||tablename)) as toast_and_indexes,
+    (SELECT count(*) FROM pg_largeobject_metadata) as large_object_count
+FROM pg_tables
+WHERE tablename IN ('documents', 'images')
+GROUP BY schemaname, tablename;
+```
+
+### Backup and Restore
+
+```bash
+# Backup database with large objects
+pg_dump -Fc --blobs mydb > mydb.dump
+
+# Backup without large objects
+pg_dump -Fc --no-blobs mydb > mydb_no_blobs.dump
+
+# Restore
+pg_restore -d mydb mydb.dump
+
+# For BYTEA columns, standard backup includes them automatically
+pg_dump mydb > mydb.sql
+```
+
+### Best Practices
+
+1. **Choose the Right Storage Method**:
+   - Use BYTEA for files < 100MB
+   - Use Large Objects for files > 100MB or when streaming is needed
+   - Consider external storage (S3, filesystem) for very large files
+
+2. **Cleanup Orphaned Large Objects**:
+```sql
+-- Schedule regular cleanup
+SELECT lo_unlink(oid) 
+FROM pg_largeobject_metadata lo
+WHERE NOT EXISTS (
+    SELECT 1 FROM documents WHERE file_oid = lo.oid
+);
+```
+
+3. **Monitor Storage Usage**:
+```sql
+-- Check large object storage
+SELECT 
+    count(*) as lo_count,
+    pg_size_pretty(sum(length(data))) as total_size
+FROM pg_largeobject;
+
+-- Check BYTEA storage
+SELECT 
+    tablename,
+    pg_size_pretty(pg_total_relation_size(tablename::regclass))
+FROM pg_tables
+WHERE schemaname = 'public';
+```
+
+4. **Use Appropriate Access Patterns**:
+```sql
+-- For large objects: streaming access
+-- For BYTEA: batch access, cache results
+```
+
+5. **Consider Compression**:
+```sql
+-- BYTEA with explicit compression
+CREATE EXTENSION IF NOT EXISTS pg_compression;
+
+INSERT INTO files (filename, content)
+VALUES ('data.txt', compress(pg_read_binary_file('/path/to/data.txt')));
+
+SELECT uncompress(content) FROM files WHERE filename = 'data.txt';
+```
+
+- **Further Reading**: [PostgreSQL Large Objects](https://www.postgresql.org/docs/18/largeobjects.html) | [Binary Data Types](https://www.postgresql.org/docs/18/datatype-binary.html) | [TOAST](https://www.postgresql.org/docs/18/storage-toast.html)
 
 ## 7. Postmaster Process
-The Postmaster is the primary process for a PostgreSQL database cluster responsible for managing the database connections.
 
-- **Example**: You can check the active database connections with `SELECT * FROM pg_stat_activity;`
-- **Further Reading**: [PostgreSQL Postmaster Documentation](https://www.postgresql.org/docs/18/architecture.html#architecture-processes)
+### Overview
+The Postmaster is PostgreSQL's main supervisory process. It's the first process started when PostgreSQL starts and is responsible for managing all other PostgreSQL processes, handling connections, and maintaining database cluster integrity.
 
-## 8. ID Wraparound
-To prevent data loss, PostgreSQL requires regular vacuums to manage the transaction ID wraparound.
+### PostgreSQL Process Architecture
 
-- **Example**: Check for warnings using the command `VACUUM FREEZE;`
-- **Further Reading**: [PostgreSQL ID Wraparound Documentation](https://www.postgresql.org/docs/18/routine-vacuuming.html#VACUUM-FREEZE)
+```
+┌────────────────────────────────────────────────────────────┐
+│                PostgreSQL Process Architecture             │
+├────────────────────────────────────────────────────────────┤
+│                                                             │
+│  ┌──────────────────────────────────────────────────────┐ │
+│  │              Postmaster (Main Process)                │ │
+│  │  • Listens for connections                           │ │
+│  │  • Spawns backend processes                          │ │
+│  │  •Manages background workers                        │ │
+│  └────────────┬─────────────────────────────────────────┘ │
+│               │                                             │
+│      ┌────────┴────────┬──────────────┬──────────────┐    │
+│      ▼                 ▼              ▼              ▼    │
+│  ┌──────────┐    ┌──────────┐   ┌──────────┐  ┌────────┐│
+│  │ Backend  │    │ Backend  │   │ Backend  │  │Backend ││
+│  │ Process  │    │ Process  │   │ Process  │  │Process ││
+│  │ (Client1)│    │ (Client2)│   │ (Client3)│  │...     ││
+│  └──────────┘    └──────────┘   └──────────┘  └────────┘│
+│                                                             │
+│  Background Processes:                                     │
+│  ┌──────────────┬──────────────┬──────────────────────┐  │
+│  │ Background   │ WAL Writer   │ Checkpointer         │  │
+│  │ Writer       │              │                       │  │
+│  ├──────────────┼──────────────┼──────────────────────┤  │
+│  │ Autovacuum   │ Stats        │ Logical Replication  │  │
+│  │ Launcher     │ Collector    │ Workers              │  │
+│  └──────────────┴──────────────┴──────────────────────┘  │
+└────────────────────────────────────────────────────────────┘
+```
+
+### Postmaster Responsibilities
+
+#### 1. Connection Management
+```sql
+-- View connection information
+SELECT 
+    pid,
+    usename,
+    application_name,
+    client_addr,
+    backend_start,
+    state,
+    query
+FROM pg_stat_activity
+ORDER BY backend_start;
+
+-- Connection limits
+SHOW max_connections;  -- Default: 100
+
+-- Reserved connections for superusers
+SHOW superuser_reserved_connections;  -- Default: 3
+
+-- Check current connection count
+SELECT 
+    count(*) as current_connections,
+    (SELECT setting::int FROM pg_settings WHERE name = 'max_connections') as max_connections,
+    (SELECT setting::int FROM pg_settings WHERE name = 'max_connections') - count(*) as available_connections
+FROM pg_stat_activity;
+```
+
+#### 2. Backend Process Spawning
+```bash
+# Each client connection gets its own backend process
+# View processes
+ps aux | grep postgres
+
+# Example output:
+# postgres 1234 ... postgres: postmaster
+# postgres 1235 ... postgres: checkpointer
+# postgres 1236 ... postgres: background writer
+# postgres 1237 ... postgres: walwriter
+# postgres 1238 ... postgres: autovacuum launcher
+# postgres 1239 ... postgres: stats collector
+# postgres 1240 ... postgres: user mydb 192.168.1.100(5432) idle
+```
+
+### Background Worker Processes
+
+#### Background Writer
+Writes dirty buffers to disk to reduce checkpoint load.
+
+```sql
+-- Monitor background writer
+SELECT 
+    checkpoints_timed,
+    checkpoints_req,
+    buffers_checkpoint,
+    buffers_clean,        -- Written by bgwriter
+    maxwritten_clean,     -- Bgwriter stopped due to max writes
+    buffers_backend,      -- Backends wrote directly
+    buffers_backend_fsync,
+    buffers_alloc
+FROM pg_stat_bgwriter;
+
+-- Configuration
+SHOW bgwriter_delay;              -- 200ms default
+SHOW bgwriter_lru_maxpages;       -- 100 default
+SHOW bgwriter_lru_multiplier;     -- 2.0 default
+
+-- Tune bgwriter
+ALTER SYSTEM SET bgwriter_delay = '100ms';
+ALTER SYSTEM SET bgwriter_lru_maxpages = '200';
+SELECT pg_reload_conf();
+```
+
+#### WAL Writer
+Flushes WAL buffers to disk periodically.
+
+```sql
+-- Configuration
+SHOW wal_writer_delay;  -- 200ms default
+SHOW wal_writer_flush_after;  -- 1MB default
+
+-- Monitor WAL activity
+SELECT 
+    pg_current_wal_lsn(),
+    pg_walfile_name(pg_current_wal_lsn())
+FROM pg_stat_activity
+LIMIT 1;
+```
+
+#### Checkpointer
+Performs checkpoints to ensure data durability.
+
+```sql
+-- Checkpoint configuration
+SHOW checkpoint_timeout;              -- 5min default
+SHOW checkpoint_completion_target;    -- 0.9 default
+SHOW max_wal_size;                   -- 1GB default
+
+-- Monitor checkpoints
+SELECT 
+    checkpoints_timed,    -- Scheduled
+    checkpoints_req,      -- Requested (tune if high)
+    checkpoint_write_time,
+    checkpoint_sync_time
+FROM pg_stat_bgwriter;
+
+-- Manual checkpoint
+CHECKPOINT;
+```
+
+#### Autovacuum Launcher
+Manages autovacuum worker processes.
+
+```sql
+-- Configuration
+SHOW autovacuum;                  -- on/off
+SHOW autovacuum_max_workers;     -- 3 default
+SHOW autovacuum_naptime;         -- 1min default
+
+-- Monitor autovacuum workers
+SELECT 
+    pid,
+    now() - xact_start AS duration,
+    query
+FROM pg_stat_activity
+WHERE query LIKE 'autovacuum:%'
+ORDER BY xact_start;
+
+-- Check autovacuum launcher
+SELECT pid, backend_start 
+FROM pg_stat_activity 
+WHERE backend_type = 'autovacuum launcher';
+```
+
+#### Stats Collector
+Collects statistics about database activity.
+
+```sql
+-- Stats collector configuration
+SHOW track_activities;           -- on
+SHOW track_counts;              -- on
+SHOW track_io_timing;           -- off (enable for detailed I/O stats)
+SHOW track_functions;           -- none/pl/all
+
+-- Enable detailed statistics
+ALTER SYSTEM SET track_io_timing = on;
+ALTER SYSTEM SET track_functions = 'all';
+SELECT pg_reload_conf();
+
+-- View collected statistics
+SELECT * FROM pg_stat_database;
+SELECT * FROM pg_stat_user_tables;
+SELECT * FROM pg_stat_user_indexes;
+```
+
+#### Logical Replication Workers
+Handle logical replication subscriptions.
+
+```sql
+-- Monitor logical replication workers
+SELECT 
+    pid,
+    application_name,
+    state,
+    sync_state,
+    sent_lsn,
+    write_lsn,
+    flush_lsn,
+    replay_lsn
+FROM pg_stat_replication;
+
+-- View subscription workers
+SELECT 
+    subname,
+    pid,
+    leader_pid,
+    relid,
+    received_lsn,
+    last_msg_send_time,
+    last_msg_receipt_time
+FROM pg_stat_subscription;
+```
+
+### Postmaster Configuration
+
+#### Connection Settings
+```sql
+-- postgresql.conf
+listen_addresses = '*'                    -- Which interfaces to listen on
+port = 5432                              -- Port number
+max_connections = 200                    -- Maximum concurrent connections
+superuser_reserved_connections = 3       -- Reserved for superusers
+unix_socket_directories = '/var/run/postgresql'  -- Unix socket location
+
+-- Connection pooling (pg_bouncer recommended for high connection count)
+-- Instead of many direct connections, use connection pooler
+```
+
+#### Process Management
+```sql
+-- postgresql.conf
+max_worker_processes = 8                 -- Max background workers
+max_parallel_workers_per_gather = 2      -- Parallel query workers
+max_parallel_workers = 8                 -- Max parallel workers total
+max_parallel_maintenance_workers = 2     -- For CREATE INDEX, VACUUM
+```
+
+### Monitoring Postmaster and Processes
+
+#### Active Processes
+```sql
+-- View all backend processes
+SELECT 
+    pid,
+    usename,
+    datname,
+    application_name,
+    client_addr,
+    backend_start,
+    state_change,
+    state,
+    backend_type,
+    wait_event_type,
+    wait_event
+FROM pg_stat_activity
+ORDER BY backend_start;
+
+-- Background processes
+SELECT 
+    pid,
+    backend_type,
+    backend_start
+FROM pg_stat_activity
+WHERE backend_type != 'client backend'
+ORDER BY backend_type;
+
+-- Count by backend type
+SELECT 
+    backend_type,
+    count(*) as count
+FROM pg_stat_activity
+GROUP BY backend_type
+ORDER BY count DESC;
+```
+
+#### Process Resource Usage
+```sql
+-- Requires pg_stat_statements extension
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+
+-- Top queries by CPU time
+SELECT 
+    query,
+    calls,
+    total_time,
+    mean_time,
+    rows
+FROM pg_stat_statements
+ORDER BY total_time DESC
+LIMIT 10;
+
+-- Blocked queries
+SELECT 
+    pid,
+    now() - pg_stat_activity.query_start AS duration,
+    query,
+    state,
+    wait_event_type,
+    wait_event
+FROM pg_stat_activity
+WHERE state != 'idle'
+    AND wait_event IS NOT NULL
+ORDER BY duration DESC;
+```
+
+#### System Catalog Queries
+```sql
+-- Database cluster information
+SELECT * FROM pg_control_system();
+
+-- Checkpoint information
+SELECT * FROM pg_control_checkpoint();
+
+-- Recovery status
+SELECT 
+    pg_is_in_recovery(),
+    pg_last_wal_receive_lsn(),
+    pg_last_wal_replay_lsn();
+```
+
+### Handling Process Issues
+
+#### Terminating Processes
+```sql
+-- Cancel a query (gentle)
+SELECT pg_cancel_backend(12345);  -- PID
+
+-- Terminate a backend (forceful)
+SELECT pg_terminate_backend(12345);
+
+-- Terminate all connections to a database
+SELECT pg_terminate_backend(pid)
+FROM pg_stat_activity
+WHERE datname = 'mydb'
+    AND pid != pg_backend_pid();
+
+-- Terminate idle connections
+SELECT pg_terminate_backend(pid)
+FROM pg_stat_activity
+WHERE state = 'idle'
+    AND state_change < now() - interval '1 hour'
+    AND pid != pg_backend_pid();
+```
+
+#### Preventing Connection Exhaustion
+```sql
+-- Set connection limits per database
+ALTER DATABASE mydb CONNECTION LIMIT 50;
+
+-- Set connection limits per role
+ALTER ROLE app_user CONNECTION LIMIT 10;
+
+-- Monitor connection usage by database
+SELECT 
+    datname,
+    count(*) as connections,
+    max(backend_start) as newest_connection
+FROM pg_stat_activity
+GROUP BY datname
+ORDER BY connections DESC;
+
+-- Use connection pooler (pg_bouncer)
+-- External tool, not part of PostgreSQL
+```
+
+### Postmaster Crash Recovery
+
+When the postmaster crashes or is killed:
+
+```bash
+# PostgreSQL performs automatic crash recovery on restart
+# 1. Postmaster reads last checkpoint from control file
+# 2. Replays WAL from checkpoint to end
+# 3. Ensures database consistency
+
+# Check PostgreSQL logs
+tail -f /var/log/postgresql/postgresql-18-main.log
+
+# Safe shutdown
+pg_ctl stop -D /var/lib/postgresql/data -m smart   # Wait for clients
+pg_ctl stop -D /var/lib/postgresql/data -m fast    # Terminate clients
+pg_ctl stop -D /var/lib/postgresql/data -m immediate  # Abort (requires recovery)
+
+# Start PostgreSQL
+pg_ctl start -D /var/lib/postgresql/data
+```
+
+### Best Practices
+
+1. **Monitor Connection Count**: Prevent exhaustion
+```sql
+SELECT count(*) * 100.0 / 
+    (SELECT setting::int FROM pg_settings WHERE name = 'max_connections')
+    as connection_usage_percent
+FROM pg_stat_activity;
+```
+
+2. **Use Connection Pooling**: For high-concurrency applications
+   - Use pg_bouncer or pgpool-II
+   - Reduces overhead of connection creation
+
+3. **Monitor Background Workers**: Ensure they're running
+```sql
+SELECT backend_type, count(*) 
+FROM pg_stat_activity 
+GROUP BY backend_type;
+```
+
+4. **Configure Appropriate Limits**: Based on workload
+```sql
+-- High-concurrency OLTP
+max_connections = 500
+max_worker_processes = 8
+
+-- Low-concurrency analytics
+max_connections = 50
+max_parallel_workers = 16
+```
+
+5. **Regular Maintenance**: Keep system healthy
+```bash
+# Monitor logs
+tail -f /var/log/postgresql/*.log
+
+# Check system resources
+top -p $(pgrep -d',' -f postgres)
+```
+
+- **Further Reading**: [PostgreSQL Server Process Architecture](https://www.postgresql.org/docs/18/tutorial-arch.html) | [Background Worker Processes](https://www.postgresql.org/docs/18/bgworker.html) | [Managing Connections](https://www.postgresql.org/docs/18/runtime-config-connection.html)
+
+## 8. Transaction ID Wraparound
+
+### Overview
+Transaction ID (XID) wraparound is a critical PostgreSQL maintenance concern. PostgreSQL uses 32-bit transaction IDs, which means after approximately **4 billion transactions**, the IDs wrap around. Without proper maintenance, this can lead to data loss as old data becomes "invisible" to new transactions.
+
+### Understanding Transaction IDs
+
+```
+┌────────────────────────────────────────────────────────────┐
+│             PostgreSQL Transaction ID Space               │
+├────────────────────────────────────────────────────────────┤
+│                                                             │
+│  32-bit Transaction IDs: 0 to 4,294,967,295 (4 billion)   │
+│                                                             │
+│  ┌──────────────────────────────────────────────────────┐ │
+│  │  0-2: Reserved (Bootstrap, Frozen, Invalid)          │ │
+│  │  3+: Regular transaction IDs                         │ │
+│  └──────────────────────────────────────────────────────┘ │
+│                                                             │
+│  Special XIDs:                                             │
+│  • 0: InvalidTransactionId                                 │
+│  • 1: BootstrapTransactionId                               │
+│  • 2: FrozenTransactionId (older than all XIDs)           │
+│  • 3+: Normal transaction IDs                              │
+│                                                             │
+└────────────────────────────────────────────────────────────┘
+```
+
+### The Wraparound Problem
+
+```
+┌────────────────────────────────────────────────────────────┐
+│               Circular Transaction ID Space                │
+├────────────────────────────────────────────────────────────┤
+│                                                             │
+│     Past ← [Current XID] → Future                          │
+│     2 billion XIDs    2 billion XIDs                       │
+│                                                             │
+│  Without freezing, after 2 billion transactions:           │
+│  • Old transactions appear to be "in the future"           │
+│  • Rows become invisible to new transactions              │
+│  • Data appears lost (but still on disk)                  │
+│                                                             │
+└────────────────────────────────────────────────────────────┘
+```
+
+### Monitoring Transaction Age
+
+#### Check Database Age
+```sql
+-- Check age of all databases
+SELECT 
+    datname,
+    age(datfrozenxid) as xid_age,
+    2147483647 - age(datfrozenxid) as xids_until_wraparound,
+    CASE 
+        WHEN age(datfrozenxid) > 1500000000 THEN 'CRITICAL - Immediate action required!'
+        WHEN age(datfrozenxid) > 1000000000 THEN 'WARNING - Schedule maintenance soon'
+        WHEN age(datfrozenxid) > 200000000 THEN 'CAUTION - Monitor closely'
+        ELSE 'OK'
+    END as status
+FROM pg_database
+ORDER BY age(datfrozenxid) DESC;
+
+-- More detailed view
+SELECT 
+    datname,
+    datfrozenxid,
+    age(datfrozenxid) as age,
+    pg_size_pretty(pg_database_size(datname)) as size,
+    (SELECT setting FROM pg_settings WHERE name = 'autovacuum_freeze_max_age')::int as freeze_max_age
+FROM pg_database
+WHERE datallowconn
+ORDER BY age(datfrozenxid) DESC;
+```
+
+#### Check Table Age
+```sql
+-- Check age of all tables
+SELECT 
+    schemaname,
+    relname,
+    age(relfrozenxid) as xid_age,
+    pg_size_pretty(pg_total_relation_size(schemaname||'.'||relname)) as size,
+    last_vacuum,
+    last_autovacuum,
+    n_dead_tup,
+    CASE 
+        WHEN age(relfrozenxid) > 1500000000 THEN 'CRITICAL'
+        WHEN age(relfrozenxid) > 1000000000 THEN 'WARNING'
+        WHEN age(relfrozenxid) > 200000000 THEN 'CAUTION'
+        ELSE 'OK'
+    END as status
+FROM pg_class c
+JOIN pg_namespace n ON c.relnamespace = n.oid
+LEFT JOIN pg_stat_user_tables s ON c.oid = s.relid
+WHERE c.relkind = 'r'  -- Regular tables only
+    AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+ORDER BY age(relfrozenxid) DESC
+LIMIT 20;
+
+-- Check for tables at risk
+SELECT 
+    n.nspname as schema,
+    c.relname as table,
+    age(c.relfrozenxid) as xid_age,
+    pg_size_pretty(pg_total_relation_size(c.oid)) as size
+FROM pg_class c
+JOIN pg_namespace n ON c.relnamespace = n.oid
+WHERE c.relkind = 'r'
+    AND age(c.relfrozenxid) > 200000000  -- Customize threshold
+ORDER BY age(c.relfrozenxid) DESC;
+```
+
+### VACUUM FREEZE
+
+#### How Freezing Works
+```sql
+-- VACUUM FREEZE marks old tuples as "frozen"
+-- Frozen tuples have xmin = FrozenTransactionId (2)
+-- Frozen tuples are visible to all transactions
+
+-- Perform VACUUM FREEZE
+VACUUM FREEZE my_table;
+
+-- View frozen tuples
+SELECT 
+    relname,
+    age(relfrozenxid) as age,
+    relfrozenxid,
+    relminmxid
+FROM pg_class
+WHERE relkind = 'r'
+    AND relname = 'my_table';
+```
+
+#### Configuration Parameters
+```sql
+-- View freeze-related settings
+SELECT name, setting, unit, short_desc
+FROM pg_settings
+WHERE name LIKE '%freeze%' OR name LIKE '%vacuum%'
+ORDER BY name;
+
+-- Key parameters (postgresql.conf)
+vacuum_freeze_min_age = 50000000           -- Min age before freezing
+vacuum_freeze_table_age = 150000000        -- Age for aggressive freeze
+autovacuum_freeze_max_age = 200000000      -- Max age before forced autovacuum
+vacuum_multixact_freeze_min_age = 5000000
+vacuum_multixact_freeze_table_age = 150000000
+autovacuum_multixact_freeze_max_age = 400000000
+
+-- Tune for high-transaction environments
+ALTER SYSTEM SET autovacuum_freeze_max_age = 500000000;
+ALTER SYSTEM SET vacuum_freeze_min_age = 50000000;
+SELECT pg_reload_conf();
+```
+
+### Preventing Wraparound
+
+#### Strategy 1: Ensure Autovacuum is Working
+```sql
+-- Check autovacuum is enabled
+SHOW autovacuum;  -- Must be 'on'
+
+-- Monitor autovacuum activity
+SELECT 
+    schemaname,
+    relname,
+    last_autovacuum,
+    autovacuum_count,
+    n_dead_tup,
+    n_live_tup
+FROM pg_stat_user_tables
+WHERE last_autovacuum IS NOT NULL
+ORDER BY last_autovacuum DESC;
+
+-- Check for tables that haven't been autovacuumed
+SELECT 
+    schemaname,
+    relname,
+    now() - last_autovacuum as time_since_autovacuum,
+    n_dead_tup
+FROM pg_stat_user_tables
+WHERE last_autovacuum IS NULL
+    OR last_autovacuum < now() - interval '7 days'
+ORDER BY n_dead_tup DESC;
+```
+
+#### Strategy 2: Manual VACUUM for Problem Tables
+```sql
+-- Identify tables needing vacuum
+WITH table_ages AS (
+    SELECT 
+        n.nspname as schema,
+        c.relname as table,
+        age(c.relfrozenxid) as xid_age,
+        pg_total_relation_size(c.oid) as size_bytes
+    FROM pg_class c
+    JOIN pg_namespace n ON c.relnamespace = n.oid
+    WHERE c.relkind = 'r'
+        AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+)
+SELECT 
+    schema,
+    table,
+    xid_age,
+    pg_size_pretty(size_bytes) as size,
+    'VACUUM FREEZE ' || schema || '.' || table || ';' as vacuum_command
+FROM table_ages
+WHERE xid_age > 200000000
+ORDER BY xid_age DESC;
+
+-- Execute manual vacuum
+VACUUM FREEZE VERBOSE my_large_table;
+```
+
+#### Strategy 3: Scheduled Maintenance
+```bash
+# Cron job for proactive freezing
+# /etc/cron.daily/postgres-freeze-maintenance.sh
+
+#!/bin/bash
+psql -U postgres -d mydb << EOF
+-- Freeze old tables
+SELECT 'VACUUM FREEZE ' || schemaname || '.' || tablename || ';'
+FROM pg_tables
+WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
+\gexec
+
+-- Verify ages
+SELECT datname, age(datfrozenxid) FROM pg_database;
+EOF
+```
+
+### Wraparound Emergency Response
+
+#### Emergency Procedure
+```sql
+-- 1. Check severity
+SELECT 
+    datname,
+    age(datfrozenxid) as age,
+    2147483647 - age(datfrozenxid) as xids_remaining
+FROM pg_database
+ORDER BY age DESC;
+
+-- If age > 1.5 billion, immediate action required!
+
+-- 2. Identify problematic tables
+SELECT 
+    schemaname,
+    relname,
+    age(relfrozenxid) as xid_age,
+    pg_size_pretty(pg_total_relation_size(schemaname||'.'||relname)) as size
+FROM pg_class c
+JOIN pg_namespace n ON c.relnamespace = n.oid
+LEFT JOIN pg_stat_user_tables s ON c.oid = s.relid
+WHERE c.relkind = 'r'
+    AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+ORDER BY age(relfrozenxid) DESC
+LIMIT 10;
+
+-- 3. Vacuum oldest tables first
+VACUUM FREEZE VERBOSE oldest_table;
+
+-- 4. Monitor progress
+SELECT 
+    schemaname,
+    relname,
+    age(relfrozenxid),
+    now() - query_start as vacuum_duration,
+    query
+FROM pg_class c
+JOIN pg_namespace n ON c.relnamespace = n.oid
+JOIN pg_stat_activity a ON a.query LIKE '%' || c.relname || '%'
+WHERE a.query LIKE 'VACUUM%'
+    AND c.relkind = 'r';
+
+-- 5. If database won't start due to wraparound:
+-- PostgreSQL will enter single-user mode
+-- Run from command line:
+postgres --single -D /var/lib/postgresql/data mydb
+-- Then: VACUUM FREEZE;
+```
+
+#### Preventing Shutdown
+```sql
+-- PostgreSQL will refuse connections when:
+-- age(datfrozenxid) > 2 billion - 3 million (safety margin)
+
+-- Check how close you are
+SELECT 
+    datname,
+    age(datfrozenxid),
+    2000000000 - age(datfrozenxid) as xids_until_shutdown,
+    CASE 
+        WHEN age(datfrozenxid) > 2000000000 THEN 'DATABASE SHUTDOWN IMMINENT!'
+        WHEN age(datfrozenxid) > 1800000000 THEN 'CRITICAL - Hours remaining'
+        WHEN age(datfrozenxid) > 1500000000 THEN 'URGENT - Days remaining'
+        ELSE 'Safe'
+    END as urgency
+FROM pg_database
+ORDER BY age(datfrozenxid) DESC;
+```
+
+### Monitoring Dashboard
+
+```sql
+-- Create comprehensive monitoring view
+CREATE OR REPLACE VIEW xid_wraparound_monitor AS
+SELECT 
+    'Database' as level,
+    datname as name,
+    age(datfrozenxid) as xid_age,
+    2147483647 - age(datfrozenxid) as xids_remaining,
+    CASE 
+        WHEN age(datfrozenxid) > 1500000000 THEN 'CRITICAL'
+        WHEN age(datfrozenxid) > 1000000000 THEN 'WARNING'
+        WHEN age(datfrozenxid) > 200000000 THEN 'CAUTION'
+        ELSE 'OK'
+    END as status,
+    pg_size_pretty(pg_database_size(datname)) as size
+FROM pg_database
+WHERE datallowconn
+
+UNION ALL
+
+SELECT 
+    'Table' as level,
+    schemaname || '.' || relname as name,
+    age(relfrozenxid) as xid_age,
+    2147483647 - age(relfrozenxid) as xids_remaining,
+    CASE 
+        WHEN age(relfrozenxid) > 1500000000 THEN 'CRITICAL'
+        WHEN age(relfrozenxid) > 1000000000 THEN 'WARNING'
+        WHEN age(relfrozenxid) > 200000000 THEN 'CAUTION'
+        ELSE 'OK'
+    END as status,
+    pg_size_pretty(pg_total_relation_size(schemaname||'.'||relname)) as size
+FROM pg_class c
+JOIN pg_namespace n ON c.relnamespace = n.oid
+LEFT JOIN pg_stat_user_tables s ON c.oid = s.relid
+WHERE c.relkind = 'r'
+    AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+ORDER BY xid_age DESC
+LIMIT 50;
+
+-- Query the view
+SELECT * FROM xid_wraparound_monitor WHERE status != 'OK';
+```
+
+### Best Practices
+
+1. **Monitor Regularly**: Check XID age weekly
+```sql
+-- Add to monitoring system
+SELECT max(age(datfrozenxid)) FROM pg_database;
+-- Alert if > 200 million
+```
+
+2. **Keep Autovacuum Enabled**: Never disable autovacuum
+```sql
+-- Verify it's running
+SELECT count(*) FROM pg_stat_activity 
+WHERE query LIKE 'autovacuum:%';
+```
+
+3. **Tune Autovacuum Aggressively**: For high-transaction systems
+```sql
+ALTER SYSTEM SET autovacuum_freeze_max_age = 500000000;
+ALTER SYSTEM SET autovacuum_naptime = '30s';
+ALTER SYSTEM SET autovacuum_max_workers = 5;
+```
+
+4. **Schedule Periodic VACUUM FREEZE**: During maintenance windows
+```bash
+# Weekly freeze of all tables
+psql -c "VACUUM FREEZE VERBOSE;" mydb
+```
+
+5. **Plan for Maintenance**: Large tables take time to freeze
+```sql
+-- Estimate vacuum time
+SELECT 
+    relname,
+    pg_size_pretty(pg_total_relation_size(relname::regclass)) as size,
+    age(relfrozenxid),
+    pg_total_relation_size(relname::regclass) / (1024*1024) / 100 as estimated_minutes
+FROM pg_class
+WHERE relkind = 'r'
+    AND age(relfrozenxid) > 200000000
+ORDER BY pg_total_relation_size(relname::regclass) DESC;
+```
+
+6. **Use Monitoring Tools**: Set up alerts
+   - Prometheus + postgres_exporter
+   - Nagios/Icinga with XID age checks
+   - Custom scripts with pg_monitor role
+
+- **Further Reading**: [PostgreSQL Routine Vacuuming](https://www.postgresql.org/docs/18/routine-vacuuming.html#VACUUM-FOR-WRAPAROUND) | [Transaction ID Wraparound](https://www.postgresql.org/docs/18/routine-vacuuming.html#VACUUM-FOR-WRAPAROUND)
 
 ## 9. Explain Plans
 The `EXPLAIN` command provides insight into how PostgreSQL executes queries.
