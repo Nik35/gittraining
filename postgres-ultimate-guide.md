@@ -2872,6 +2872,8 @@ FROM pg_database
 ORDER BY age DESC;
 
 -- If age > 1.5 billion, immediate action required!
+-- Note: 1.5 billion (1,500,000,000) is the critical threshold
+-- PostgreSQL will enter emergency mode at ~2 billion to prevent wraparound
 
 -- 2. Identify problematic tables
 SELECT 
@@ -4638,6 +4640,9 @@ SELECT pg_reload_conf();
 pg_ctl stop -D /var/lib/postgresql/data
 
 # Take base backup from primary
+# Security Note: Use .pgpass file or PGPASSWORD environment variable
+# to avoid exposing passwords in command history
+# .pgpass format: hostname:port:database:username:password
 pg_basebackup -h primary_host -D /var/lib/postgresql/data -U replicator -P -Xs -R
 
 # The -R flag automatically creates standby.signal and configures recovery
