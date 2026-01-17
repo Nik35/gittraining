@@ -2200,7 +2200,7 @@ The Postmaster is PostgreSQL's main supervisory process. It's the first process 
 │  │              Postmaster (Main Process)                │ │
 │  │  • Listens for connections                           │ │
 │  │  • Spawns backend processes                          │ │
-│  │  •Manages background workers                        │ │
+│  │  • Manages background workers                        │ │
 │  └────────────┬─────────────────────────────────────────┘ │
 │               │                                             │
 │      ┌────────┴────────┬──────────────┬──────────────┐    │
