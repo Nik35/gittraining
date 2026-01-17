@@ -72,6 +72,7 @@ The `pg_class` and `pg_stat` system catalogs provide useful metadata about table
 ## 12. Replication Types
 PostgreSQL supports both synchronous and asynchronous replication for high availability.
 
+- **Example**: `SELECT * FROM pg_stat_replication;`
 - **Further Reading**: [PostgreSQL Replication Documentation](https://www.postgresql.org/docs/18/warm-standby.html)
 
 ## Conclusion
