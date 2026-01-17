@@ -3027,27 +3027,2174 @@ ORDER BY pg_total_relation_size(relname::regclass) DESC;
 - **Further Reading**: [PostgreSQL Routine Vacuuming](https://www.postgresql.org/docs/18/routine-vacuuming.html#VACUUM-FOR-WRAPAROUND) | [Transaction ID Wraparound](https://www.postgresql.org/docs/18/routine-vacuuming.html#VACUUM-FOR-WRAPAROUND)
 
 ## 9. Explain Plans
-The `EXPLAIN` command provides insight into how PostgreSQL executes queries.
 
-- **Example**: `EXPLAIN SELECT * FROM my_table;`
-- **Further Reading**: [PostgreSQL EXPLAIN Documentation](https://www.postgresql.org/docs/18/sql-explain.html)
+### Overview
+EXPLAIN shows the execution plan PostgreSQL's query planner generates for a query. Understanding EXPLAIN output is crucial for query optimization and performance tuning.
+
+### EXPLAIN Basics
+
+```sql
+-- Basic EXPLAIN
+EXPLAIN SELECT * FROM users WHERE email = 'user@example.com';
+
+-- EXPLAIN with execution (actually runs query)
+EXPLAIN ANALYZE SELECT * FROM users WHERE email = 'user@example.com';
+
+-- Detailed output with all options
+EXPLAIN (ANALYZE, BUFFERS, VERBOSE, COSTS, TIMING, SUMMARY)
+SELECT * FROM users WHERE email = 'user@example.com';
+```
+
+### EXPLAIN Options
+
+```
+┌─────────────────────┬──────────────────────────────────────┐
+│ Option              │ Description                          │
+├─────────────────────┼──────────────────────────────────────┤
+│ ANALYZE             │ Execute query and show actual times  │
+│ VERBOSE             │ Show additional details              │
+│ COSTS               │ Show estimated costs (default: on)   │
+│ BUFFERS             │ Show buffer usage statistics         │
+│ TIMING              │ Show actual timing (default: on)     │
+│ SUMMARY             │ Show summary statistics              │
+│ FORMAT              │ Output format: TEXT, JSON, XML, YAML │
+│ SETTINGS            │ Show modified configuration params   │
+│ WAL                 │ Show WAL generation statistics       │
+└─────────────────────┴──────────────────────────────────────┘
+```
+
+### Reading EXPLAIN Output
+
+#### Basic Plan Structure
+```sql
+EXPLAIN SELECT * FROM orders WHERE customer_id = 123;
+
+-- Output:
+-- Seq Scan on orders  (cost=0.00..1234.56 rows=100 width=50)
+--   Filter: (customer_id = 123)
+
+-- Components:
+-- • Node Type: Seq Scan (sequential scan)
+-- • Table: orders
+-- • Startup Cost: 0.00 (cost to return first row)
+-- • Total Cost: 1234.56 (cost to return all rows)
+-- • Estimated Rows: 100
+-- • Width: 50 bytes per row
+```
+
+### Common Scan Types
+
+#### Sequential Scan
+```sql
+-- Reads entire table
+EXPLAIN ANALYZE
+SELECT * FROM large_table WHERE status = 'active';
+
+-- Seq Scan on large_table  (cost=0.00..1829.00 rows=50000 width=100)
+--   Filter: (status = 'active'::text)
+
+-- Used when:
+-- • No suitable index
+-- • Table is small
+-- • Query returns large percentage of rows
+```
+
+#### Index Scan
+```sql
+-- Uses index to find rows
+CREATE INDEX idx_orders_customer ON orders(customer_id);
+
+EXPLAIN ANALYZE
+SELECT * FROM orders WHERE customer_id = 123;
+
+-- Index Scan using idx_orders_customer on orders
+--   (cost=0.29..8.31 rows=1 width=100)
+--   Index Cond: (customer_id = 123)
+
+-- Characteristics:
+-- • Random I/O to read index then table
+-- • Efficient for selective queries
+-- • Can be slow for many rows
+```
+
+#### Index Only Scan
+```sql
+-- Satisfies query entirely from index
+CREATE INDEX idx_orders_customer_date 
+ON orders(customer_id) INCLUDE (order_date);
+
+EXPLAIN ANALYZE
+SELECT customer_id, order_date 
+FROM orders 
+WHERE customer_id = 123;
+
+-- Index Only Scan using idx_orders_customer_date
+--   (cost=0.29..4.31 rows=1 width=12)
+--   Index Cond: (customer_id = 123)
+--   Heap Fetches: 0
+
+-- Requirements:
+-- • All columns in index
+-- • Table has been vacuumed (visibility map updated)
+```
+
+#### Bitmap Scan
+```sql
+-- Two-phase scan: build bitmap, then scan table
+EXPLAIN ANALYZE
+SELECT * FROM orders 
+WHERE status = 'pending' AND priority = 'high';
+
+-- Bitmap Heap Scan on orders  (cost=24.75..829.23 rows=500 width=100)
+--   Recheck Cond: ((status = 'pending') AND (priority = 'high'))
+--   ->  Bitmap Index Scan on idx_status  (cost=0.00..24.62 rows=500)
+--         Index Cond: ((status = 'pending') AND (priority = 'high'))
+
+-- Advantages:
+-- • Combines multiple indexes efficiently
+-- • Sequential I/O on table
+-- • Good for moderate selectivity
+```
+
+### Join Types
+
+#### Nested Loop Join
+```sql
+EXPLAIN ANALYZE
+SELECT o.*, u.name
+FROM orders o
+JOIN users u ON o.user_id = u.id
+WHERE o.status = 'pending';
+
+-- Nested Loop  (cost=0.58..1234.56 rows=100 width=150)
+--   ->  Seq Scan on orders o  (cost=0.00..829.00 rows=100)
+--         Filter: (status = 'pending')
+--   ->  Index Scan using users_pkey on users u  (cost=0.29..4.05 rows=1)
+--         Index Cond: (id = o.user_id)
+
+-- Characteristics:
+-- • Efficient for small outer relation
+-- • Uses index on inner relation
+-- • O(N * M) complexity
+```
+
+#### Hash Join
+```sql
+EXPLAIN ANALYZE
+SELECT o.*, p.name
+FROM orders o
+JOIN products p ON o.product_id = p.id;
+
+-- Hash Join  (cost=123.45..2345.67 rows=10000 width=200)
+--   Hash Cond: (o.product_id = p.id)
+--   ->  Seq Scan on orders o  (cost=0.00..1829.00 rows=100000)
+--   ->  Hash  (cost=100.00..100.00 rows=1000 width=50)
+--         ->  Seq Scan on products p  (cost=0.00..100.00 rows=1000)
+
+-- Characteristics:
+-- • Build hash table from smaller relation
+-- • Probe with larger relation
+-- • Efficient for large joins
+-- • Requires work_mem
+```
+
+#### Merge Join
+```sql
+EXPLAIN ANALYZE
+SELECT o.*, u.name
+FROM orders o
+JOIN users u ON o.user_id = u.id
+ORDER BY o.user_id;
+
+-- Merge Join  (cost=234.56..3456.78 rows=100000 width=150)
+--   Merge Cond: (o.user_id = u.id)
+--   ->  Index Scan using idx_orders_user_id on orders o
+--   ->  Index Scan using users_pkey on users u
+
+-- Characteristics:
+-- • Requires sorted input
+-- • Very efficient when inputs are pre-sorted
+-- • O(N + M) complexity
+```
+
+### Aggregation and Sorting
+
+#### Aggregate Functions
+```sql
+EXPLAIN ANALYZE
+SELECT customer_id, COUNT(*), SUM(total)
+FROM orders
+GROUP BY customer_id;
+
+-- HashAggregate  (cost=2345.00..2545.00 rows=10000 width=20)
+--   Group Key: customer_id
+--   ->  Seq Scan on orders  (cost=0.00..1829.00 rows=100000)
+
+-- Or with sorted input:
+-- GroupAggregate  (cost=1234.56..2234.56 rows=10000 width=20)
+--   Group Key: customer_id
+--   ->  Index Scan using idx_orders_customer on orders
+```
+
+#### Sorting
+```sql
+EXPLAIN ANALYZE
+SELECT * FROM orders ORDER BY created_at DESC LIMIT 100;
+
+-- Limit  (cost=1234.56..1234.81 rows=100 width=100)
+--   ->  Sort  (cost=1234.56..1484.56 rows=100000 width=100)
+--         Sort Key: created_at DESC
+--         Sort Method: top-N heapsort  Memory: 123kB
+--         ->  Seq Scan on orders
+
+-- Sort Methods:
+-- • quicksort: In-memory sort
+-- • top-N heapsort: For LIMIT queries
+-- • external merge: Disk-based (increase work_mem if frequent)
+```
+
+### EXPLAIN ANALYZE with BUFFERS
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM orders WHERE customer_id = 123;
+
+-- Index Scan using idx_orders_customer on orders
+--   (cost=0.29..8.31 rows=1 width=100)
+--   (actual time=0.025..0.027 rows=1 loops=1)
+--   Index Cond: (customer_id = 123)
+--   Buffers: shared hit=4
+-- Planning:
+--   Buffers: shared hit=8
+-- Planning Time: 0.123 ms
+-- Execution Time: 0.045 ms
+
+-- Buffer statistics:
+-- • shared hit: Pages found in cache
+-- • shared read: Pages read from disk
+-- • shared dirtied: Pages modified
+-- • shared written: Pages written to disk
+-- • temp read/written: Temporary file I/O
+```
+
+### Query Optimization Techniques
+
+#### Technique 1: Add Missing Indexes
+```sql
+-- Before: Sequential scan
+EXPLAIN ANALYZE
+SELECT * FROM orders WHERE status = 'pending';
+
+-- Seq Scan on orders  (cost=0.00..1829.00 rows=5000)
+--   Filter: (status = 'pending')
+--   Rows Removed by Filter: 95000
+-- Execution Time: 125.234 ms
+
+-- Add index
+CREATE INDEX idx_orders_status ON orders(status);
+ANALYZE orders;
+
+-- After: Index scan
+EXPLAIN ANALYZE
+SELECT * FROM orders WHERE status = 'pending';
+
+-- Index Scan using idx_orders_status on orders
+--   (cost=0.29..234.56 rows=5000)
+--   Index Cond: (status = 'pending')
+-- Execution Time: 12.345 ms
+```
+
+#### Technique 2: Use Covering Indexes
+```sql
+-- Before: Index scan + heap fetches
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT customer_id, order_date, total
+FROM orders
+WHERE customer_id = 123;
+
+-- Index Scan using idx_orders_customer
+--   Buffers: shared hit=45 read=10
+
+-- Create covering index
+CREATE INDEX idx_orders_customer_covering 
+ON orders(customer_id) 
+INCLUDE (order_date, total);
+ANALYZE orders;
+
+-- After: Index only scan
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT customer_id, order_date, total
+FROM orders
+WHERE customer_id = 123;
+
+-- Index Only Scan using idx_orders_customer_covering
+--   Heap Fetches: 0
+--   Buffers: shared hit=3
+```
+
+#### Technique 3: Increase work_mem for Sorts
+```sql
+-- Before: External merge (disk-based)
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM large_table ORDER BY created_at;
+
+-- Sort Method: external merge  Disk: 12345kB
+
+-- Increase work_mem for session
+SET work_mem = '64MB';
+
+-- After: In-memory sort
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM large_table ORDER BY created_at;
+
+-- Sort Method: quicksort  Memory: 45678kB
+```
+
+#### Technique 4: Partition Large Tables
+```sql
+-- Before: Scan entire large table
+EXPLAIN ANALYZE
+SELECT * FROM logs WHERE log_date = '2024-01-15';
+
+-- Seq Scan on logs  (cost=0.00..500000.00 rows=1000)
+--   Filter: (log_date = '2024-01-15')
+
+-- Create partitioned table
+CREATE TABLE logs_partitioned (
+    id BIGSERIAL,
+    log_date DATE,
+    message TEXT
+) PARTITION BY RANGE (log_date);
+
+CREATE TABLE logs_2024_01 PARTITION OF logs_partitioned
+    FOR VALUES FROM ('2024-01-01') TO ('2024-02-01');
+
+-- After: Scan only relevant partition
+EXPLAIN ANALYZE
+SELECT * FROM logs_partitioned WHERE log_date = '2024-01-15';
+
+-- Seq Scan on logs_2024_01  (cost=0.00..15000.00 rows=1000)
+--   Filter: (log_date = '2024-01-15')
+```
+
+#### Technique 5: Use Partial Indexes
+```sql
+-- Before: Large index on all rows
+CREATE INDEX idx_orders_all ON orders(status);
+-- Index size: 500 MB
+
+-- After: Partial index on subset
+DROP INDEX idx_orders_all;
+CREATE INDEX idx_orders_pending ON orders(status) 
+WHERE status IN ('pending', 'processing');
+-- Index size: 50 MB
+
+-- Query must match WHERE clause
+EXPLAIN ANALYZE
+SELECT * FROM orders WHERE status = 'pending';
+
+-- Index Scan using idx_orders_pending
+```
+
+### Advanced Analysis
+
+#### Comparing Plans
+```sql
+-- Compare different approaches
+-- Approach 1: Subquery
+EXPLAIN ANALYZE
+SELECT *
+FROM orders
+WHERE customer_id IN (
+    SELECT id FROM customers WHERE active = true
+);
+
+-- Approach 2: JOIN
+EXPLAIN ANALYZE
+SELECT o.*
+FROM orders o
+JOIN customers c ON o.customer_id = c.id
+WHERE c.active = true;
+
+-- Approach 3: EXISTS
+EXPLAIN ANALYZE
+SELECT *
+FROM orders o
+WHERE EXISTS (
+    SELECT 1 FROM customers c 
+    WHERE c.id = o.customer_id AND c.active = true
+);
+
+-- Compare execution times and choose best plan
+```
+
+#### Analyzing Parallel Queries
+```sql
+-- Enable parallel query
+SET max_parallel_workers_per_gather = 4;
+
+EXPLAIN ANALYZE
+SELECT COUNT(*) FROM large_table;
+
+-- Finalize Aggregate  (cost=123456.78..123456.79 rows=1)
+--   ->  Gather  (cost=123456.12..123456.78 rows=4)
+--         Workers Planned: 4
+--         Workers Launched: 4
+--         ->  Partial Aggregate  (cost=122456.12..122456.13 rows=1)
+--               ->  Parallel Seq Scan on large_table
+--                     (cost=0.00..112345.67 rows=4044444)
+
+-- Shows parallel execution with 4 workers
+```
+
+#### Using JSON Format for Programmatic Analysis
+```sql
+EXPLAIN (ANALYZE, FORMAT JSON)
+SELECT * FROM orders WHERE customer_id = 123;
+
+-- Returns JSON structure:
+-- {
+--   "Plan": {
+--     "Node Type": "Index Scan",
+--     "Relation Name": "orders",
+--     "Index Name": "idx_orders_customer",
+--     "Startup Cost": 0.29,
+--     "Total Cost": 8.31,
+--     "Plan Rows": 1,
+--     "Actual Rows": 1,
+--     "Actual Total Time": 0.045
+--   }
+-- }
+
+-- Useful for monitoring tools and automation
+```
+
+### Practical Examples
+
+#### Optimizing a Complex Query
+```sql
+-- Initial slow query
+EXPLAIN ANALYZE
+SELECT 
+    u.name,
+    COUNT(o.id) as order_count,
+    SUM(o.total) as total_spent,
+    AVG(o.total) as avg_order
+FROM users u
+LEFT JOIN orders o ON u.id = o.user_id
+WHERE u.active = true
+    AND u.created_at >= '2024-01-01'
+    AND (o.status = 'completed' OR o.status IS NULL)
+GROUP BY u.id, u.name
+HAVING COUNT(o.id) > 5
+ORDER BY total_spent DESC
+LIMIT 100;
+
+-- Analyze the plan and optimize:
+-- 1. Add index on users(active, created_at)
+CREATE INDEX idx_users_active_created ON users(active, created_at);
+
+-- 2. Add index on orders(user_id, status) INCLUDE (total)
+CREATE INDEX idx_orders_user_status 
+ON orders(user_id, status) INCLUDE (total);
+
+-- 3. Update statistics
+ANALYZE users;
+ANALYZE orders;
+
+-- 4. Re-run EXPLAIN ANALYZE and compare
+```
+
+#### Debugging Slow Aggregation
+```sql
+-- Problem: Slow GROUP BY
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT 
+    date_trunc('day', created_at) as day,
+    COUNT(*),
+    SUM(amount)
+FROM transactions
+WHERE created_at >= NOW() - INTERVAL '30 days'
+GROUP BY day
+ORDER BY day;
+
+-- Solution: Index on date expression
+CREATE INDEX idx_transactions_day 
+ON transactions(date_trunc('day', created_at))
+WHERE created_at >= NOW() - INTERVAL '90 days';  -- Partial index
+
+-- Or: Materialized view for aggregates
+CREATE MATERIALIZED VIEW daily_transactions AS
+SELECT 
+    date_trunc('day', created_at) as day,
+    COUNT(*) as count,
+    SUM(amount) as total
+FROM transactions
+GROUP BY day;
+
+CREATE UNIQUE INDEX ON daily_transactions(day);
+REFRESH MATERIALIZED VIEW CONCURRENTLY daily_transactions;
+```
+
+### Best Practices
+
+1. **Always use EXPLAIN ANALYZE for optimization**
+   - Shows actual vs estimated rows
+   - Reveals performance bottlenecks
+
+2. **Monitor buffer usage**
+   - High "read" values indicate disk I/O
+   - Tune shared_buffers or add indexes
+
+3. **Watch for row estimate mismatches**
+   - Large differences indicate stale statistics
+   - Run ANALYZE regularly
+
+4. **Look for sequential scans on large tables**
+   - Usually indicates missing indexes
+   - Acceptable for small tables or batch operations
+
+5. **Check for expensive operations**
+   - Sort operations with disk spills
+   - Nested loops with many iterations
+   - Full table scans
+
+6. **Use pg_stat_statements for query patterns**
+```sql
+CREATE EXTENSION pg_stat_statements;
+
+-- Find slowest queries
+SELECT 
+    query,
+    calls,
+    total_time,
+    mean_time,
+    rows
+FROM pg_stat_statements
+ORDER BY mean_time DESC
+LIMIT 10;
+```
+
+- **Further Reading**: [PostgreSQL EXPLAIN](https://www.postgresql.org/docs/18/sql-explain.html) | [Using EXPLAIN](https://www.postgresql.org/docs/18/using-explain.html) | [Query Planning](https://www.postgresql.org/docs/18/planner-optimizer.html)
 
 ## 10. Deadlocks
-Deadlocks occur when two transactions block each other. PostgreSQL automatically detects and resolves deadlocks.
 
-- **Example**: Configure database settings to minimize deadlocks.
-- **Further Reading**: [PostgreSQL Deadlocks Documentation](https://www.postgresql.org/docs/18/locking-issues.html)
+### Overview
+A deadlock occurs when two or more transactions are waiting for each other to release locks, creating a circular dependency. PostgreSQL automatically detects and resolves deadlocks by aborting one of the transactions.
 
-## 11. Metadata Using pg_class and pg_stat
-The `pg_class` and `pg_stat` system catalogs provide useful metadata about tables and their states.
+### Understanding Deadlocks
 
-- **Example**: `SELECT * FROM pg_class WHERE relname = 'my_table';`
-- **Further Reading**: [PostgreSQL pg_class Documentation](https://www.postgresql.org/docs/18/catalog-pg-class.html)
+```
+┌────────────────────────────────────────────────────────────┐
+│                    Deadlock Scenario                       │
+├────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Transaction 1:                Transaction 2:              │
+│  BEGIN;                        BEGIN;                      │
+│  UPDATE accounts               UPDATE accounts             │
+│    SET balance = balance - 100   SET balance = balance + 50│
+│    WHERE id = 1;                 WHERE id = 2;             │
+│  -- Locks row 1               -- Locks row 2               │
+│                                                             │
+│  UPDATE accounts               UPDATE accounts             │
+│    SET balance = balance + 100   SET balance = balance - 50│
+│    WHERE id = 2;                 WHERE id = 1;             │
+│  -- Waits for row 2           -- Waits for row 1           │
+│  ⚠️ DEADLOCK DETECTED!                                     │
+│                                                             │
+│  PostgreSQL aborts one transaction (the "victim")          │
+└────────────────────────────────────────────────────────────┘
+```
+
+### Deadlock Detection
+
+PostgreSQL's deadlock detector runs periodically (default: every 1 second).
+
+```sql
+-- View deadlock detection timeout
+SHOW deadlock_timeout;  -- Default: 1s
+
+-- Configure (postgresql.conf)
+deadlock_timeout = 1s
+
+-- When deadlock detected, one transaction receives error:
+-- ERROR: deadlock detected
+-- DETAIL: Process 12345 waits for ShareLock on transaction 67890;
+--         blocked by process 12346.
+--         Process 12346 waits for ShareLock on transaction 67889;
+--         blocked by process 12345.
+```
+
+### Monitoring Deadlocks
+
+#### Check Deadlock Statistics
+```sql
+-- View deadlock count per database
+SELECT 
+    datname,
+    deadlocks,
+    conflicts,
+    temp_files,
+    temp_bytes
+FROM pg_stat_database
+WHERE datname NOT IN ('template0', 'template1')
+ORDER BY deadlocks DESC;
+
+-- Reset statistics to track new deadlocks
+SELECT pg_stat_reset();
+
+-- Monitor specific database
+SELECT 
+    deadlocks,
+    blks_read,
+    blks_hit,
+    tup_returned,
+    tup_fetched
+FROM pg_stat_database
+WHERE datname = current_database();
+```
+
+#### Identify Blocking Queries
+```sql
+-- View currently blocked queries
+SELECT 
+    blocked_locks.pid AS blocked_pid,
+    blocked_activity.usename AS blocked_user,
+    blocking_locks.pid AS blocking_pid,
+    blocking_activity.usename AS blocking_user,
+    blocked_activity.query AS blocked_statement,
+    blocking_activity.query AS current_statement_in_blocking_process,
+    blocked_activity.application_name AS blocked_application,
+    blocking_activity.application_name AS blocking_application
+FROM pg_catalog.pg_locks blocked_locks
+JOIN pg_catalog.pg_stat_activity blocked_activity ON blocked_activity.pid = blocked_locks.pid
+JOIN pg_catalog.pg_locks blocking_locks 
+    ON blocking_locks.locktype = blocked_locks.locktype
+    AND blocking_locks.database IS NOT DISTINCT FROM blocked_locks.database
+    AND blocking_locks.relation IS NOT DISTINCT FROM blocked_locks.relation
+    AND blocking_locks.page IS NOT DISTINCT FROM blocked_locks.page
+    AND blocking_locks.tuple IS NOT DISTINCT FROM blocked_locks.tuple
+    AND blocking_locks.virtualxid IS NOT DISTINCT FROM blocked_locks.virtualxid
+    AND blocking_locks.transactionid IS NOT DISTINCT FROM blocked_locks.transactionid
+    AND blocking_locks.classid IS NOT DISTINCT FROM blocked_locks.classid
+    AND blocking_locks.objid IS NOT DISTINCT FROM blocked_locks.objid
+    AND blocking_locks.objsubid IS NOT DISTINCT FROM blocked_locks.objsubid
+    AND blocking_locks.pid != blocked_locks.pid
+JOIN pg_catalog.pg_stat_activity blocking_activity ON blocking_activity.pid = blocking_locks.pid
+WHERE NOT blocked_locks.granted;
+
+-- Simplified blocking query view
+SELECT 
+    waiting.pid AS waiting_pid,
+    waiting.query AS waiting_query,
+    blocking.pid AS blocking_pid,
+    blocking.query AS blocking_query
+FROM pg_stat_activity AS waiting
+JOIN pg_stat_activity AS blocking 
+    ON blocking.pid = ANY(pg_blocking_pids(waiting.pid))
+WHERE waiting.state = 'active';
+```
+
+#### View Lock Information
+```sql
+-- Current locks in the database
+SELECT 
+    locktype,
+    database,
+    relation::regclass,
+    page,
+    tuple,
+    transactionid,
+    mode,
+    granted,
+    pid
+FROM pg_locks
+WHERE NOT granted
+ORDER BY pid;
+
+-- Locks by relation
+SELECT 
+    c.relname,
+    l.locktype,
+    l.mode,
+    l.granted,
+    l.pid,
+    a.query
+FROM pg_locks l
+JOIN pg_class c ON l.relation = c.oid
+JOIN pg_stat_activity a ON l.pid = a.pid
+WHERE c.relname = 'accounts'
+ORDER BY l.pid;
+```
+
+### Common Deadlock Scenarios
+
+#### Scenario 1: Update Order Mismatch
+```sql
+-- Transaction 1
+BEGIN;
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;  -- Locks account 1
+UPDATE accounts SET balance = balance + 100 WHERE id = 2;  -- Waits for account 2
+COMMIT;
+
+-- Transaction 2 (concurrent)
+BEGIN;
+UPDATE accounts SET balance = balance - 50 WHERE id = 2;   -- Locks account 2
+UPDATE accounts SET balance = balance + 50 WHERE id = 1;   -- Waits for account 1
+COMMIT;
+
+-- Result: DEADLOCK!
+```
+
+**Solution**: Always acquire locks in consistent order
+```sql
+-- Both transactions lock accounts in same order (by ID)
+BEGIN;
+UPDATE accounts SET balance = balance - 100 
+WHERE id = 1;  -- Lower ID first
+UPDATE accounts SET balance = balance + 100 
+WHERE id = 2;  -- Higher ID next
+COMMIT;
+
+-- Or use explicit locking with ordered SELECT
+BEGIN;
+SELECT * FROM accounts WHERE id IN (1, 2) ORDER BY id FOR UPDATE;
+-- Perform updates
+COMMIT;
+```
+
+#### Scenario 2: Lock Upgrade Deadlock
+```sql
+-- Transaction 1
+BEGIN;
+SELECT * FROM orders WHERE id = 100;  -- Acquires AccessShareLock
+
+-- Transaction 2
+BEGIN;
+SELECT * FROM orders WHERE id = 100;  -- Acquires AccessShareLock
+
+-- Transaction 1 (continued)
+UPDATE orders SET status = 'completed' WHERE id = 100;  -- Needs RowExclusiveLock, waits
+
+-- Transaction 2 (continued)
+UPDATE orders SET status = 'completed' WHERE id = 100;  -- Needs RowExclusiveLock, waits
+
+-- Result: DEADLOCK!
+```
+
+**Solution**: Use SELECT FOR UPDATE to acquire write lock immediately
+```sql
+BEGIN;
+SELECT * FROM orders WHERE id = 100 FOR UPDATE;  -- Acquires RowShareLock + RowExclusiveLock
+UPDATE orders SET status = 'completed' WHERE id = 100;
+COMMIT;
+```
+
+#### Scenario 3: Foreign Key Deadlock
+```sql
+-- Parent-child tables with foreign keys
+-- Transaction 1
+BEGIN;
+INSERT INTO orders (id, customer_id) VALUES (1, 100);
+-- Locks customer 100 in customers table
+
+-- Transaction 2
+BEGIN;
+INSERT INTO orders (id, customer_id) VALUES (2, 101);
+-- Locks customer 101 in customers table
+
+-- Transaction 1 (continued)
+UPDATE customers SET last_order_date = NOW() WHERE id = 101;
+-- Waits for customer 101
+
+-- Transaction 2 (continued)
+UPDATE customers SET last_order_date = NOW() WHERE id = 100;
+-- Waits for customer 100
+
+-- Result: DEADLOCK!
+```
+
+**Solution**: Use consistent locking order or redesign schema
+```sql
+-- Option 1: Lock parents first
+BEGIN;
+SELECT * FROM customers WHERE id IN (100, 101) ORDER BY id FOR UPDATE;
+INSERT INTO orders (id, customer_id) VALUES (1, 100);
+UPDATE customers SET last_order_date = NOW() WHERE id = 100;
+COMMIT;
+
+-- Option 2: Use triggers to handle updates consistently
+-- Option 3: Denormalize to avoid cross-table locks
+```
+
+### Preventing Deadlocks
+
+#### Strategy 1: Consistent Lock Ordering
+```sql
+-- Bad: Random order
+UPDATE accounts SET balance = balance + amount 
+WHERE id = from_account;
+UPDATE accounts SET balance = balance - amount 
+WHERE id = to_account;
+
+-- Good: Ordered by ID
+BEGIN;
+SELECT * FROM accounts 
+WHERE id IN (from_account, to_account)
+ORDER BY id
+FOR UPDATE;
+
+-- Now perform updates safely
+UPDATE accounts SET balance = balance - amount WHERE id = from_account;
+UPDATE accounts SET balance = balance + amount WHERE id = to_account;
+COMMIT;
+```
+
+#### Strategy 2: Keep Transactions Short
+```sql
+-- Bad: Long transaction
+BEGIN;
+UPDATE inventory SET quantity = quantity - 1 WHERE product_id = 123;
+-- ... long-running computation ...
+-- ... API call ...
+-- ... user interaction ...
+UPDATE orders SET status = 'completed' WHERE id = 456;
+COMMIT;
+
+-- Good: Short transaction
+-- Do computation outside transaction
+result = compute_something();
+
+-- Quick transaction
+BEGIN;
+UPDATE inventory SET quantity = quantity - 1 WHERE product_id = 123;
+UPDATE orders SET status = 'completed' WHERE id = 456;
+COMMIT;
+```
+
+#### Strategy 3: Use Lower Isolation Levels
+```sql
+-- Serializable isolation has higher deadlock risk
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+-- Operations
+COMMIT;
+
+-- Read Committed has lower deadlock risk (default)
+BEGIN TRANSACTION ISOLATION LEVEL READ COMMITTED;
+-- Operations
+COMMIT;
+```
+
+#### Strategy 4: Use Advisory Locks
+```sql
+-- Application-level locking to serialize critical sections
+BEGIN;
+
+-- Acquire advisory lock (blocks until available)
+SELECT pg_advisory_xact_lock(hashtext('transfer:' || from_id || ':' || to_id));
+
+-- Perform transfer
+UPDATE accounts SET balance = balance - 100 WHERE id = from_id;
+UPDATE accounts SET balance = balance + 100 WHERE id = to_id;
+
+COMMIT;  -- Advisory lock automatically released
+```
+
+#### Strategy 5: Implement Retry Logic
+```python
+# Python example with deadlock retry
+import psycopg2
+import time
+
+def transfer_with_retry(conn, from_id, to_id, amount, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            cursor = conn.cursor()
+            cursor.execute("BEGIN")
+            
+            # Lock accounts in consistent order
+            cursor.execute("""
+                SELECT * FROM accounts 
+                WHERE id IN (%s, %s) 
+                ORDER BY id 
+                FOR UPDATE
+            """, (from_id, to_id))
+            
+            # Perform transfer
+            cursor.execute(
+                "UPDATE accounts SET balance = balance - %s WHERE id = %s",
+                (amount, from_id)
+            )
+            cursor.execute(
+                "UPDATE accounts SET balance = balance + %s WHERE id = %s",
+                (amount, to_id)
+            )
+            
+            cursor.execute("COMMIT")
+            return True
+            
+        except psycopg2.extensions.TransactionRollbackError as e:
+            conn.rollback()
+            if 'deadlock detected' in str(e):
+                if attempt < max_retries - 1:
+                    # Exponential backoff
+                    time.sleep(0.1 * (2 ** attempt))
+                    continue
+            raise
+        except Exception as e:
+            conn.rollback()
+            raise
+    
+    return False
+```
+
+### Analyzing Deadlocks from Logs
+
+```bash
+# PostgreSQL logs deadlock details
+# postgresql.conf
+log_lock_waits = on              # Log slow lock acquisitions
+deadlock_timeout = 1s            # How long to wait before checking
+log_min_duration_statement = 1000  # Log queries > 1 second
+
+# Example log entry:
+# ERROR: deadlock detected
+# DETAIL: Process 12345 waits for ShareLock on transaction 67890; 
+#         blocked by process 12346.
+#         Process 12346 waits for ShareLock on transaction 67889; 
+#         blocked by process 12345.
+# HINT: See server log for query details.
+# CONTEXT: while updating tuple (0,42) in relation "accounts"
+# STATEMENT: UPDATE accounts SET balance = balance + 100 WHERE id = 2;
+
+# Parse logs for deadlocks
+grep "deadlock detected" /var/log/postgresql/postgresql-*.log
+```
+
+### Deadlock Monitoring Query
+
+```sql
+-- Create monitoring view
+CREATE OR REPLACE VIEW deadlock_monitor AS
+SELECT 
+    d.datname,
+    d.deadlocks,
+    d.deadlocks - COALESCE(LAG(d.deadlocks) OVER (ORDER BY d.stats_reset), 0) as deadlocks_since_last,
+    d.stats_reset,
+    now() - d.stats_reset as time_since_reset
+FROM pg_stat_database d
+WHERE d.datname NOT IN ('template0', 'template1')
+ORDER BY d.deadlocks DESC;
+
+-- Query it
+SELECT * FROM deadlock_monitor;
+
+-- Alert if deadlocks increasing
+SELECT 
+    datname,
+    deadlocks
+FROM pg_stat_database
+WHERE deadlocks > 10  -- Adjust threshold
+    AND datname = current_database();
+```
+
+### Best Practices
+
+1. **Design to avoid deadlocks**:
+   - Use consistent lock ordering
+   - Keep transactions short
+   - Minimize lock contention
+
+2. **Monitor deadlock frequency**:
+```sql
+SELECT datname, deadlocks 
+FROM pg_stat_database 
+ORDER BY deadlocks DESC;
+```
+
+3. **Implement retry logic**: Handle deadlock errors gracefully
+
+4. **Use appropriate isolation levels**: Lower isolation reduces deadlock risk
+
+5. **Log and analyze deadlocks**:
+```sql
+ALTER SYSTEM SET log_lock_waits = on;
+ALTER SYSTEM SET deadlock_timeout = '1s';
+SELECT pg_reload_conf();
+```
+
+6. **Consider application-level locking**: For complex scenarios
+
+7. **Test under load**: Simulate concurrent access to find deadlock scenarios
+
+8. **Use connection pooling**: Reduces connection overhead, allows better control
+
+- **Further Reading**: [PostgreSQL Deadlocks](https://www.postgresql.org/docs/18/explicit-locking.html#LOCKING-DEADLOCKS) | [Lock Management](https://www.postgresql.org/docs/18/explicit-locking.html) | [Monitoring Locks](https://www.postgresql.org/docs/18/monitoring-locks.html)
+
+## 11. Metadata Using System Catalogs
+
+### Overview
+PostgreSQL maintains extensive metadata about the database cluster in system catalogs. These catalogs provide information about tables, indexes, columns, functions, users, and more. Understanding system catalogs is essential for database administration, monitoring, and troubleshooting.
+
+### Key System Catalogs
+
+```
+┌────────────────────────────────────────────────────────────┐
+│              PostgreSQL System Catalogs                    │
+├────────────────────────────────────────────────────────────┤
+│ pg_class       → Tables, indexes, views, sequences         │
+│ pg_attribute   → Table columns and attributes              │
+│ pg_index       → Index definitions                         │
+│ pg_constraint  → Constraints (PK, FK, CHECK)              │
+│ pg_type        → Data types                                │
+│ pg_proc        → Functions and procedures                  │
+│ pg_namespace   → Schemas                                   │
+│ pg_database    → Databases in the cluster                 │
+│ pg_tablespace  → Tablespaces                              │
+│ pg_roles       → Database roles (users/groups)            │
+│ pg_stat_*      → Statistics views                         │
+│ pg_settings    → Configuration parameters                  │
+└────────────────────────────────────────────────────────────┘
+```
+
+### pg_class - Tables and Relations
+
+```sql
+-- View all user tables
+SELECT 
+    n.nspname as schema,
+    c.relname as name,
+    CASE c.relkind
+        WHEN 'r' THEN 'table'
+        WHEN 'i' THEN 'index'
+        WHEN 'S' THEN 'sequence'
+        WHEN 'v' THEN 'view'
+        WHEN 'm' THEN 'materialized view'
+        WHEN 'f' THEN 'foreign table'
+        WHEN 'p' THEN 'partitioned table'
+    END as type,
+    pg_size_pretty(pg_total_relation_size(c.oid)) as total_size,
+    c.reltuples::bigint as estimated_rows,
+    c.relpages as pages
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND c.relkind IN ('r', 'p')  -- Regular and partitioned tables
+ORDER BY pg_total_relation_size(c.oid) DESC;
+
+-- Get detailed table information
+SELECT 
+    c.relname as table_name,
+    c.relnamespace::regnamespace as schema,
+    c.relowner::regrole as owner,
+    c.relpersistence as persistence,  -- p=permanent, u=unlogged, t=temporary
+    c.relkind as kind,
+    c.relhasindex as has_indexes,
+    c.relhasrules as has_rules,
+    c.relhastriggers as has_triggers,
+    c.relrowsecurity as row_security,
+    c.relforcerowsecurity as force_row_security,
+    c.relreplident as replica_identity,
+    pg_size_pretty(pg_relation_size(c.oid)) as table_size,
+    pg_size_pretty(pg_total_relation_size(c.oid)) as total_size
+FROM pg_class c
+WHERE c.relname = 'users'
+    AND c.relkind = 'r';
+
+-- Check table statistics
+SELECT 
+    schemaname,
+    tablename,
+    n_live_tup as live_rows,
+    n_dead_tup as dead_rows,
+    n_tup_ins as inserts,
+    n_tup_upd as updates,
+    n_tup_del as deletes,
+    n_tup_hot_upd as hot_updates,
+    last_vacuum,
+    last_autovacuum,
+    last_analyze,
+    last_autoanalyze
+FROM pg_stat_user_tables
+WHERE tablename = 'users';
+```
+
+### pg_attribute - Column Information
+
+```sql
+-- List columns for a table
+SELECT 
+    a.attnum as position,
+    a.attname as column_name,
+    pg_catalog.format_type(a.atttypid, a.atttypmod) as data_type,
+    a.attnotnull as not_null,
+    a.atthasdef as has_default,
+    pg_catalog.pg_get_expr(d.adbin, d.adrelid) as default_value,
+    col_description(c.oid, a.attnum) as description
+FROM pg_catalog.pg_attribute a
+JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
+LEFT JOIN pg_catalog.pg_attrdef d ON (a.attrelid = d.adrelid AND a.attnum = d.adnum)
+WHERE c.relname = 'users'
+    AND a.attnum > 0  -- Exclude system columns
+    AND NOT a.attisdropped  -- Exclude dropped columns
+ORDER BY a.attnum;
+
+-- Find all columns of a specific type
+SELECT 
+    n.nspname as schema,
+    c.relname as table,
+    a.attname as column,
+    pg_catalog.format_type(a.atttypid, a.atttypmod) as type
+FROM pg_attribute a
+JOIN pg_class c ON a.attrelid = c.oid
+JOIN pg_namespace n ON c.relnamespace = n.oid
+WHERE pg_catalog.format_type(a.atttypid, a.atttypmod) LIKE '%json%'
+    AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND a.attnum > 0
+    AND NOT a.attisdropped
+ORDER BY n.nspname, c.relname, a.attnum;
+```
+
+### pg_index - Index Information
+
+```sql
+-- List all indexes with details
+SELECT 
+    n.nspname as schema,
+    t.relname as table,
+    i.relname as index,
+    a.amname as index_type,
+    ix.indisunique as is_unique,
+    ix.indisprimary as is_primary,
+    ix.indisvalid as is_valid,
+    pg_size_pretty(pg_relation_size(i.oid)) as index_size,
+    pg_get_indexdef(ix.indexrelid) as index_definition
+FROM pg_index ix
+JOIN pg_class t ON t.oid = ix.indrelid
+JOIN pg_class i ON i.oid = ix.indexrelid
+JOIN pg_namespace n ON n.oid = t.relnamespace
+JOIN pg_am a ON a.oid = i.relam
+WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+ORDER BY pg_relation_size(i.oid) DESC;
+
+-- Find unused indexes
+SELECT 
+    schemaname,
+    tablename,
+    indexname,
+    idx_scan,
+    idx_tup_read,
+    idx_tup_fetch,
+    pg_size_pretty(pg_relation_size(indexrelid)) as size
+FROM pg_stat_user_indexes
+WHERE idx_scan = 0
+    AND indexrelname NOT LIKE 'pg_toast%'
+ORDER BY pg_relation_size(indexrelid) DESC;
+
+-- Index usage statistics
+SELECT 
+    schemaname,
+    tablename,
+    indexname,
+    idx_scan,
+    idx_tup_read,
+    idx_tup_fetch,
+    pg_size_pretty(pg_relation_size(indexrelid)) as size,
+    round(100.0 * idx_scan / NULLIF(
+        (SELECT SUM(idx_scan) FROM pg_stat_user_indexes WHERE tablename = psu.tablename), 0
+    ), 2) as scan_percentage
+FROM pg_stat_user_indexes psu
+WHERE schemaname = 'public'
+ORDER BY idx_scan DESC;
+```
+
+### pg_stat_* Views - Statistics
+
+#### pg_stat_database
+```sql
+-- Database-level statistics
+SELECT 
+    datname,
+    numbackends as connections,
+    xact_commit as commits,
+    xact_rollback as rollbacks,
+    blks_read as disk_blocks_read,
+    blks_hit as cache_blocks_hit,
+    round(100.0 * blks_hit / NULLIF(blks_hit + blks_read, 0), 2) as cache_hit_ratio,
+    tup_returned,
+    tup_fetched,
+    tup_inserted,
+    tup_updated,
+    tup_deleted,
+    conflicts,
+    temp_files,
+    pg_size_pretty(temp_bytes) as temp_size,
+    deadlocks,
+    blk_read_time,
+    blk_write_time,
+    stats_reset
+FROM pg_stat_database
+WHERE datname = current_database();
+```
+
+#### pg_stat_user_tables
+```sql
+-- Table-level statistics
+SELECT 
+    schemaname,
+    relname,
+    seq_scan,  -- Sequential scans
+    seq_tup_read,  -- Rows read by sequential scans
+    idx_scan,  -- Index scans
+    idx_tup_fetch,  -- Rows fetched by index scans
+    n_tup_ins,  -- Inserts
+    n_tup_upd,  -- Updates
+    n_tup_del,  -- Deletes
+    n_tup_hot_upd,  -- HOT (Heap-Only Tuple) updates
+    n_live_tup,  -- Estimated live rows
+    n_dead_tup,  -- Estimated dead rows
+    n_mod_since_analyze,  -- Rows modified since last ANALYZE
+    last_vacuum,
+    last_autovacuum,
+    last_analyze,
+    last_autoanalyze,
+    vacuum_count,
+    autovacuum_count,
+    analyze_count,
+    autoanalyze_count
+FROM pg_stat_user_tables
+ORDER BY seq_scan DESC;
+
+-- Tables needing attention
+SELECT 
+    schemaname,
+    relname,
+    n_live_tup,
+    n_dead_tup,
+    round(100.0 * n_dead_tup / NULLIF(n_live_tup + n_dead_tup, 0), 2) as dead_ratio,
+    last_autovacuum,
+    last_autoanalyze
+FROM pg_stat_user_tables
+WHERE n_dead_tup > 1000
+    AND n_live_tup > 0
+ORDER BY dead_ratio DESC;
+```
+
+#### pg_stat_activity
+```sql
+-- Current database activity
+SELECT 
+    pid,
+    usename,
+    application_name,
+    client_addr,
+    client_port,
+    backend_start,
+    xact_start,
+    query_start,
+    state_change,
+    wait_event_type,
+    wait_event,
+    state,
+    backend_type,
+    LEFT(query, 100) as query_preview
+FROM pg_stat_activity
+WHERE state != 'idle'
+    AND pid != pg_backend_pid()
+ORDER BY xact_start NULLS LAST;
+
+-- Long-running queries
+SELECT 
+    pid,
+    now() - xact_start AS duration,
+    usename,
+    query
+FROM pg_stat_activity
+WHERE state != 'idle'
+    AND xact_start IS NOT NULL
+    AND now() - xact_start > interval '5 minutes'
+ORDER BY duration DESC;
+
+-- Blocked queries
+SELECT 
+    blocked_locks.pid AS blocked_pid,
+    blocked_activity.usename AS blocked_user,
+    blocking_locks.pid AS blocking_pid,
+    blocking_activity.usename AS blocking_user,
+    blocked_activity.query AS blocked_query,
+    blocking_activity.query AS blocking_query
+FROM pg_catalog.pg_locks blocked_locks
+JOIN pg_catalog.pg_stat_activity blocked_activity ON blocked_activity.pid = blocked_locks.pid
+JOIN pg_catalog.pg_locks blocking_locks 
+    ON blocking_locks.locktype = blocked_locks.locktype
+    AND blocking_locks.pid != blocked_locks.pid
+JOIN pg_catalog.pg_stat_activity blocking_activity ON blocking_activity.pid = blocking_locks.pid
+WHERE NOT blocked_locks.granted
+    AND blocking_locks.granted;
+```
+
+### pg_settings - Configuration
+
+```sql
+-- View all configuration settings
+SELECT 
+    name,
+    setting,
+    unit,
+    category,
+    short_desc,
+    context,  -- When setting can be changed
+    vartype,  -- bool, integer, real, string, enum
+    source,   -- Where setting came from
+    min_val,
+    max_val,
+    enumvals,  -- For enum types
+    boot_val,  -- Default value
+    reset_val  -- Value at session start
+FROM pg_settings
+WHERE name LIKE '%work_mem%'
+ORDER BY name;
+
+-- Modified settings
+SELECT 
+    name,
+    setting,
+    unit,
+    source,
+    sourcefile,
+    sourceline
+FROM pg_settings
+WHERE source != 'default'
+    AND source != 'override'
+ORDER BY name;
+
+-- Settings that require restart
+SELECT 
+    name,
+    setting,
+    unit,
+    short_desc
+FROM pg_settings
+WHERE context = 'postmaster'
+ORDER BY name;
+```
+
+### pg_constraint - Constraints
+
+```sql
+-- List all constraints
+SELECT 
+    n.nspname as schema,
+    t.relname as table,
+    c.conname as constraint_name,
+    CASE c.contype
+        WHEN 'p' THEN 'PRIMARY KEY'
+        WHEN 'f' THEN 'FOREIGN KEY'
+        WHEN 'u' THEN 'UNIQUE'
+        WHEN 'c' THEN 'CHECK'
+        WHEN 'x' THEN 'EXCLUSION'
+    END as constraint_type,
+    pg_get_constraintdef(c.oid) as definition
+FROM pg_constraint c
+JOIN pg_class t ON c.conrelid = t.oid
+JOIN pg_namespace n ON t.relnamespace = n.oid
+WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+ORDER BY n.nspname, t.relname, c.contype;
+
+-- Foreign key relationships
+SELECT 
+    tc.table_schema,
+    tc.table_name,
+    kcu.column_name,
+    ccu.table_schema AS foreign_table_schema,
+    ccu.table_name AS foreign_table_name,
+    ccu.column_name AS foreign_column_name,
+    rc.update_rule,
+    rc.delete_rule
+FROM information_schema.table_constraints AS tc
+JOIN information_schema.key_column_usage AS kcu
+    ON tc.constraint_name = kcu.constraint_name
+    AND tc.table_schema = kcu.table_schema
+JOIN information_schema.constraint_column_usage AS ccu
+    ON ccu.constraint_name = tc.constraint_name
+    AND ccu.table_schema = tc.table_schema
+JOIN information_schema.referential_constraints AS rc
+    ON tc.constraint_name = rc.constraint_name
+WHERE tc.constraint_type = 'FOREIGN KEY'
+    AND tc.table_schema = 'public'
+ORDER BY tc.table_name;
+```
+
+### Practical Monitoring Queries
+
+#### Database Size and Growth
+```sql
+-- Database sizes
+SELECT 
+    datname,
+    pg_size_pretty(pg_database_size(datname)) as size,
+    age(datfrozenxid) as xid_age
+FROM pg_database
+WHERE datallowconn
+ORDER BY pg_database_size(datname) DESC;
+
+-- Table sizes with indexes
+SELECT 
+    n.nspname as schema,
+    c.relname as table,
+    pg_size_pretty(pg_table_size(c.oid)) as table_size,
+    pg_size_pretty(pg_indexes_size(c.oid)) as indexes_size,
+    pg_size_pretty(pg_total_relation_size(c.oid)) as total_size,
+    round(100.0 * pg_indexes_size(c.oid) / NULLIF(pg_total_relation_size(c.oid), 0), 2) as index_ratio
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND c.relkind = 'r'
+ORDER BY pg_total_relation_size(c.oid) DESC
+LIMIT 20;
+```
+
+#### Cache Hit Ratios
+```sql
+-- Overall cache hit ratio
+SELECT 
+    'Cache Hit Ratio' as metric,
+    round(100.0 * sum(blks_hit) / NULLIF(sum(blks_hit) + sum(blks_read), 0), 2) || '%' as value
+FROM pg_stat_database
+WHERE datname = current_database();
+
+-- Per-table cache hit ratio
+SELECT 
+    schemaname,
+    tablename,
+    heap_blks_read,
+    heap_blks_hit,
+    round(100.0 * heap_blks_hit / NULLIF(heap_blks_hit + heap_blks_read, 0), 2) as cache_hit_ratio
+FROM pg_statio_user_tables
+WHERE heap_blks_read + heap_blks_hit > 0
+ORDER BY heap_blks_read DESC;
+```
+
+#### Index Bloat Estimation
+```sql
+-- Estimate index bloat
+SELECT 
+    schemaname,
+    tablename,
+    indexname,
+    pg_size_pretty(pg_relation_size(indexrelid)) as index_size,
+    idx_scan,
+    idx_tup_read,
+    idx_tup_fetch,
+    CASE 
+        WHEN idx_scan = 0 THEN 'Unused'
+        WHEN idx_tup_read = 0 THEN 'Never read'
+        ELSE 'In use'
+    END as usage_status
+FROM pg_stat_user_indexes
+WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
+ORDER BY pg_relation_size(indexrelid) DESC;
+```
+
+### Creating Custom Monitoring Views
+
+```sql
+-- Comprehensive database health view
+CREATE OR REPLACE VIEW database_health AS
+SELECT 
+    'Connections' as metric,
+    current_setting('max_connections')::int - 
+        (SELECT count(*) FROM pg_stat_activity) as available,
+    (SELECT count(*) FROM pg_stat_activity) as used,
+    current_setting('max_connections') as maximum
+UNION ALL
+SELECT 
+    'Cache Hit Ratio',
+    round(100.0 * sum(blks_hit) / NULLIF(sum(blks_hit) + sum(blks_read), 0), 2),
+    NULL,
+    '95%+ is good'
+FROM pg_stat_database
+WHERE datname = current_database()
+UNION ALL
+SELECT 
+    'Deadlocks',
+    sum(deadlocks),
+    NULL,
+    'Should be 0'
+FROM pg_stat_database
+WHERE datname = current_database()
+UNION ALL
+SELECT 
+    'Transaction ID Age',
+    max(age(datfrozenxid)),
+    NULL,
+    '< 200M is safe'
+FROM pg_database;
+
+-- Query it
+SELECT * FROM database_health;
+```
+
+### Best Practices
+
+1. **Regular Statistics Updates**: Keep statistics current
+```sql
+ANALYZE;  -- Update statistics for all tables
+```
+
+2. **Monitor Key Metrics**: Set up alerts
+   - Cache hit ratio < 95%
+   - Deadlocks > 0
+   - XID age > 200 million
+   - Connection usage > 80%
+
+3. **Use pg_stat_statements**: Track query performance
+```sql
+CREATE EXTENSION pg_stat_statements;
+```
+
+4. **Reset Statistics Periodically**: For baseline comparisons
+```sql
+SELECT pg_stat_reset();
+```
+
+5. **Document Schema**: Use comments
+```sql
+COMMENT ON TABLE users IS 'Application user accounts';
+COMMENT ON COLUMN users.email IS 'Unique email address';
+```
+
+6. **Automate Monitoring**: Use tools like pgAdmin, Prometheus, or custom scripts
+
+- **Further Reading**: [PostgreSQL System Catalogs](https://www.postgresql.org/docs/18/catalogs.html) | [Statistics Views](https://www.postgresql.org/docs/18/monitoring-stats.html) | [pg_stat_activity](https://www.postgresql.org/docs/18/monitoring-stats.html#MONITORING-PG-STAT-ACTIVITY-VIEW)
 
 ## 12. Replication Types
-PostgreSQL supports both synchronous and asynchronous replication for high availability.
 
-- **Further Reading**: [PostgreSQL Replication Documentation](https://www.postgresql.org/docs/18/warm-standby.html)
+### Overview
+PostgreSQL supports multiple replication methods, each designed for different use cases. Replication provides high availability, load balancing, and disaster recovery capabilities.
+
+### Replication Architecture
+
+```
+┌────────────────────────────────────────────────────────────┐
+│           PostgreSQL Replication Types                     │
+├────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Physical Replication (WAL-based)                          │
+│  ├─ Streaming Replication                                  │
+│  │  ├─ Synchronous                                         │
+│  │  └─ Asynchronous                                        │
+│  └─ Log Shipping (File-based)                              │
+│                                                             │
+│  Logical Replication                                       │
+│  ├─ Publish/Subscribe                                      │
+│  ├─ Selective replication (tables/schemas)                │
+│  └─ Cross-version replication                             │
+│                                                             │
+└────────────────────────────────────────────────────────────┘
+```
+
+### Physical Replication (Streaming)
+
+Physical replication replicates the entire database cluster at the block level by streaming WAL records.
+
+#### Characteristics
+- **Replicates**: Entire database cluster
+- **Granularity**: Block-level (binary replication)
+- **Standby Access**: Read-only queries (hot standby)
+- **Version**: Same major version required
+- **Consistency**: Byte-for-byte identical
+- **Performance**: Very efficient, minimal overhead
+
+#### Setting Up Streaming Replication
+
+**On Primary Server**:
+```sql
+-- postgresql.conf
+wal_level = replica                    -- Enable WAL for replication
+max_wal_senders = 10                   -- Max replication connections
+wal_keep_size = 1GB                    -- Keep WAL for standbys (PG 13+)
+max_replication_slots = 10             -- Replication slots
+hot_standby = on                       -- Allow queries on standby
+archive_mode = on                      -- Enable WAL archiving
+archive_command = 'cp %p /archive/%f'  -- Archive WAL files
+
+-- Create replication user
+CREATE ROLE replicator WITH REPLICATION LOGIN PASSWORD 'secure_password';
+
+-- pg_hba.conf - Allow replication connections
+# host    replication     replicator      standby_ip/32      scram-sha-256
+
+-- Create replication slot (recommended)
+SELECT pg_create_physical_replication_slot('standby_slot');
+
+-- Reload configuration
+SELECT pg_reload_conf();
+```
+
+**On Standby Server**:
+```bash
+# Stop PostgreSQL on standby
+pg_ctl stop -D /var/lib/postgresql/data
+
+# Take base backup from primary
+pg_basebackup -h primary_host -D /var/lib/postgresql/data -U replicator -P -Xs -R
+
+# The -R flag automatically creates standby.signal and configures recovery
+```
+
+```sql
+-- postgresql.conf on standby
+hot_standby = on                       -- Allow read-only queries
+max_standby_streaming_delay = 30s      -- Max delay before canceling queries
+wal_receiver_status_interval = 10s     -- Report status to primary
+hot_standby_feedback = on              -- Prevent query conflicts
+
+-- postgresql.auto.conf (created by pg_basebackup -R)
+primary_conninfo = 'host=primary_host port=5432 user=replicator password=secure_password'
+primary_slot_name = 'standby_slot'     -- Use replication slot
+
+# Start standby
+pg_ctl start -D /var/lib/postgresql/data
+```
+
+#### Monitoring Streaming Replication
+
+**On Primary**:
+```sql
+-- View replication status
+SELECT 
+    pid,
+    usesysid,
+    usename,
+    application_name,
+    client_addr,
+    client_hostname,
+    state,
+    sent_lsn,
+    write_lsn,
+    flush_lsn,
+    replay_lsn,
+    sync_state,  -- async, potential, sync, quorum
+    pg_wal_lsn_diff(sent_lsn, replay_lsn) as replication_lag_bytes,
+    write_lag,
+    flush_lag,
+    replay_lag
+FROM pg_stat_replication;
+
+-- Check replication slots
+SELECT 
+    slot_name,
+    slot_type,  -- physical or logical
+    database,
+    active,
+    xmin,
+    catalog_xmin,
+    restart_lsn,
+    confirmed_flush_lsn,
+    wal_status,  -- reserved, extended, unreserved
+    safe_wal_size,
+    pg_size_pretty(
+        pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)
+    ) as retained_wal
+FROM pg_replication_slots;
+
+-- WAL sender processes
+SELECT 
+    pid,
+    state,
+    sent_lsn,
+    write_lsn,
+    flush_lsn,
+    replay_lsn
+FROM pg_stat_replication;
+```
+
+**On Standby**:
+```sql
+-- Check if in recovery mode
+SELECT pg_is_in_recovery();  -- Should return true
+
+-- Replication status
+SELECT 
+    pg_is_in_recovery(),
+    pg_last_wal_receive_lsn() as receive_lsn,
+    pg_last_wal_replay_lsn() as replay_lsn,
+    pg_last_xact_replay_timestamp() as last_replay_time,
+    now() - pg_last_xact_replay_timestamp() as replication_lag;
+
+-- WAL receiver status
+SELECT 
+    pid,
+    status,
+    receive_start_lsn,
+    receive_start_tli,
+    received_lsn,
+    received_tli,
+    last_msg_send_time,
+    last_msg_receipt_time,
+    latest_end_lsn,
+    latest_end_time,
+    slot_name,
+    sender_host,
+    sender_port,
+    conninfo
+FROM pg_stat_wal_receiver;
+```
+
+### Synchronous vs Asynchronous Replication
+
+#### Asynchronous Replication (Default)
+```
+┌────────────────────────────────────────────────────────────┐
+│              Asynchronous Replication                      │
+├────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Primary                           Standby                 │
+│  ├─ COMMIT returns immediately    ├─ Receives WAL later   │
+│  ├─ No wait for standby           ├─ May lag behind        │
+│  └─ Best performance               └─ Potential data loss  │
+│                                                             │
+│  Use case: High performance, acceptable data loss risk    │
+└────────────────────────────────────────────────────────────┘
+```
+
+```sql
+-- Configure asynchronous (default)
+-- postgresql.conf on primary
+synchronous_commit = off  -- Or 'on' for async replication
+synchronous_standby_names = ''  -- Empty = async
+```
+
+#### Synchronous Replication
+```
+┌────────────────────────────────────────────────────────────┐
+│              Synchronous Replication                       │
+├────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Primary                           Standby                 │
+│  ├─ COMMIT waits for standby      ├─ Confirms WAL receipt │
+│  ├─ Ensures durability            ├─ Always up-to-date    │
+│  └─ Higher latency                └─ No data loss         │
+│                                                             │
+│  Use case: Zero data loss, critical transactions           │
+└────────────────────────────────────────────────────────────┘
+```
+
+```sql
+-- Configure synchronous
+-- postgresql.conf on primary
+synchronous_commit = on                          -- or 'remote_apply'
+synchronous_standby_names = 'FIRST 1 (standby1, standby2)'  -- Wait for 1
+
+-- Levels of synchronous_commit:
+-- • on: Wait for WAL flush to disk on primary
+-- • remote_write: Wait for standby to write WAL (not flush)
+-- • remote_apply: Wait for standby to apply WAL (strongest)
+-- • local: Flush on primary only
+-- • off: Don't wait (fastest, least safe)
+
+-- Multiple standbys with quorum
+synchronous_standby_names = 'ANY 2 (standby1, standby2, standby3)'  -- Wait for any 2
+
+-- Check sync state
+SELECT application_name, sync_state FROM pg_stat_replication;
+-- async: Asynchronous
+-- potential: Could become sync
+-- sync: Currently synchronous
+-- quorum: Part of quorum group
+```
+
+### Replication Slots
+
+Replication slots prevent WAL deletion until all subscribers have received it.
+
+```sql
+-- Create physical replication slot
+SELECT pg_create_physical_replication_slot('slot_name');
+
+-- Create logical replication slot
+SELECT pg_create_logical_replication_slot('slot_name', 'pgoutput');
+
+-- List replication slots
+SELECT * FROM pg_replication_slots;
+
+-- Drop replication slot
+SELECT pg_drop_replication_slot('slot_name');
+
+-- Advance replication slot (skip WAL)
+SELECT pg_replication_slot_advance('slot_name', 'target_lsn');
+
+-- Monitor slot lag
+SELECT 
+    slot_name,
+    pg_size_pretty(
+        pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)
+    ) as lag
+FROM pg_replication_slots
+WHERE active = true;
+```
+
+### Logical Replication
+
+Logical replication replicates data changes at the logical level (SQL statements), allowing selective replication.
+
+#### Characteristics
+- **Replicates**: Selective tables/schemas
+- **Granularity**: Row-level changes
+- **Standby Access**: Read-write (separate database)
+- **Version**: Cross-version compatible
+- **Consistency**: Logical consistency
+- **Flexibility**: Transform data during replication
+
+#### Use Cases
+- Replicating subset of database
+- Consolidating multiple databases
+- Upgrading PostgreSQL versions
+- Real-time analytics
+- Multi-master scenarios (with extensions)
+
+#### Setting Up Logical Replication
+
+**On Publisher (Source)**:
+```sql
+-- postgresql.conf
+wal_level = logical                    -- Enable logical replication
+max_replication_slots = 10
+max_wal_senders = 10
+
+-- Reload configuration
+SELECT pg_reload_conf();
+
+-- Create publication (all tables in schema)
+CREATE PUBLICATION my_publication FOR ALL TABLES;
+
+-- Or specific tables
+CREATE PUBLICATION orders_publication 
+FOR TABLE orders, order_items;
+
+-- Or with filtering (PostgreSQL 15+)
+CREATE PUBLICATION active_users_pub 
+FOR TABLE users WHERE (active = true);
+
+-- View publications
+SELECT * FROM pg_publication;
+
+-- View publication tables
+SELECT * FROM pg_publication_tables;
+
+-- Grant replication permissions
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO replication_user;
+```
+
+**On Subscriber (Target)**:
+```sql
+-- Create matching table structure
+-- (Must have same columns or use column_list)
+CREATE TABLE orders (
+    id SERIAL PRIMARY KEY,
+    customer_id INTEGER,
+    order_date DATE,
+    total DECIMAL(10,2)
+);
+
+-- Create subscription
+CREATE SUBSCRIPTION my_subscription
+CONNECTION 'host=publisher_host port=5432 dbname=sourcedb user=replication_user password=secure_pass'
+PUBLICATION my_publication;
+
+-- View subscriptions
+SELECT * FROM pg_subscription;
+
+-- View subscription relations
+SELECT * FROM pg_subscription_rel;
+
+-- Monitor subscription
+SELECT 
+    subname,
+    pid,
+    received_lsn,
+    last_msg_send_time,
+    last_msg_receipt_time,
+    latest_end_lsn,
+    latest_end_time
+FROM pg_stat_subscription;
+```
+
+#### Managing Logical Replication
+
+```sql
+-- Refresh subscription (sync structure changes)
+ALTER SUBSCRIPTION my_subscription REFRESH PUBLICATION;
+
+-- Disable subscription temporarily
+ALTER SUBSCRIPTION my_subscription DISABLE;
+
+-- Enable subscription
+ALTER SUBSCRIPTION my_subscription ENABLE;
+
+-- Drop subscription
+DROP SUBSCRIPTION my_subscription;
+
+-- Add table to publication
+ALTER PUBLICATION my_publication ADD TABLE new_table;
+
+-- Remove table from publication
+ALTER PUBLICATION my_publication DROP TABLE old_table;
+
+-- Change publication to all tables
+ALTER PUBLICATION my_publication SET ALL TABLES;
+```
+
+### Cascading Replication
+
+Standbys can replicate to other standbys, creating a replication chain.
+
+```
+┌────────────────────────────────────────────────────────────┐
+│              Cascading Replication                         │
+├────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Primary → Standby 1 → Standby 2 → Standby 3              │
+│                                                             │
+│  Reduces load on primary                                   │
+│  Enables geographically distributed replicas               │
+└────────────────────────────────────────────────────────────┘
+```
+
+```sql
+-- On Standby 1 (becomes cascading standby)
+-- postgresql.conf
+max_wal_senders = 10
+hot_standby = on
+
+-- Standby 2 connects to Standby 1
+-- primary_conninfo points to Standby 1
+primary_conninfo = 'host=standby1_host port=5432 user=replicator'
+```
+
+### Replication Comparison
+
+```
+┌──────────────────┬───────────────────┬──────────────────────┐
+│ Feature          │ Physical          │ Logical              │
+├──────────────────┼───────────────────┼──────────────────────┤
+│ Granularity      │ Cluster-wide      │ Table-level          │
+│ Standby writes   │ Read-only         │ Read-write           │
+│ Version compat   │ Same major        │ Cross-version        │
+│ Performance      │ Very fast         │ Moderate             │
+│ Disk usage       │ Full copy         │ Selective            │
+│ DDL replication  │ Yes               │ No (manual)          │
+│ Sequence sync    │ Yes               │ No                   │
+│ Partial replica  │ No                │ Yes                  │
+│ Failover         │ Simple            │ Complex              │
+│ Conflict resolv  │ N/A               │ Required             │
+└──────────────────┴───────────────────┴──────────────────────┘
+```
+
+### Space and Time Efficiency
+
+#### Physical Replication Efficiency
+```sql
+-- WAL is efficiently streamed (compressed possible)
+-- No duplicate data processing
+-- Minimal CPU overhead on primary
+
+-- Monitor WAL generation rate
+SELECT 
+    pg_current_wal_lsn(),
+    pg_size_pretty(
+        pg_wal_lsn_diff(pg_current_wal_lsn(), '0/0')
+    ) as total_wal;
+
+-- With wal_compression (PostgreSQL 14+)
+-- postgresql.conf
+wal_compression = on  -- Can reduce WAL size by 50-90%
+```
+
+#### Logical Replication Efficiency
+```sql
+-- Replicates only specified tables
+-- More CPU overhead (decode WAL, apply changes)
+-- Network efficiency: Only changed data
+
+-- Monitor logical replication lag
+SELECT 
+    slot_name,
+    database,
+    pg_size_pretty(
+        pg_wal_lsn_diff(confirmed_flush_lsn, pg_current_wal_lsn())
+    ) as lag_bytes
+FROM pg_replication_slots
+WHERE slot_type = 'logical';
+```
+
+### Failover and High Availability
+
+#### Promoting Standby to Primary
+```bash
+# Automatic promotion with pg_auto_failover or Patroni
+
+# Manual promotion:
+# 1. Stop primary (if possible)
+pg_ctl stop -D /var/lib/postgresql/data -m fast
+
+# 2. Promote standby
+pg_ctl promote -D /var/lib/postgresql/data
+
+# Or using SQL
+SELECT pg_promote();
+```
+
+```sql
+-- Verify promotion
+SELECT pg_is_in_recovery();  -- Should return false
+
+-- Reconfigure other standbys to follow new primary
+-- Update primary_conninfo on remaining standbys
+```
+
+#### pg_auto_failover (Automated HA)
+```bash
+# Modern HA solution for PostgreSQL
+# Automatic failover, monitoring, and orchestration
+
+# Install pg_auto_failover
+# Configure monitor node
+pg_autoctl create monitor --hostname monitor_host --pgdata /data/monitor
+
+# Configure primary
+pg_autoctl create postgres --hostname primary_host --pgdata /data/primary \
+    --monitor postgresql://autoctl_node@monitor_host/pg_auto_failover
+
+# Configure standbys
+pg_autoctl create postgres --hostname standby_host --pgdata /data/standby \
+    --monitor postgresql://autoctl_node@monitor_host/pg_auto_failover
+```
+
+### Best Practices
+
+1. **Use Replication Slots**: Prevent WAL deletion
+```sql
+SELECT pg_create_physical_replication_slot('standby_slot');
+```
+
+2. **Monitor Replication Lag**: Set alerts
+```sql
+SELECT 
+    application_name,
+    pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn) as lag_bytes,
+    replay_lag
+FROM pg_stat_replication;
+```
+
+3. **Choose Appropriate Replication Type**:
+   - Physical: Full replica, high availability, disaster recovery
+   - Logical: Selective replication, upgrades, analytics
+
+4. **Test Failover Procedures**: Regular drills
+```bash
+# Practice promoting standby
+# Verify application can reconnect
+# Test recovery time objectives (RTO)
+```
+
+5. **Use Synchronous for Critical Data**:
+```sql
+ALTER SYSTEM SET synchronous_commit = 'remote_apply';
+ALTER SYSTEM SET synchronous_standby_names = 'FIRST 1 (standby1)';
+```
+
+6. **Archive WAL**: For point-in-time recovery
+```sql
+ALTER SYSTEM SET archive_mode = on;
+ALTER SYSTEM SET archive_command = 'cp %p /archive/%f';
+```
+
+7. **Monitor Slot Disk Usage**: Prevent disk fill
+```sql
+SELECT 
+    slot_name,
+    pg_size_pretty(
+        pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)
+    ) as retained_wal
+FROM pg_replication_slots
+WHERE active = false;  -- Alert if inactive slots retain WAL
+```
+
+8. **Use Connection Pooling**: For standbys accepting read traffic
+   - pgBouncer or pgpool-II
+   - Load balance read queries
+
+9. **Consider HA Solutions**: For production
+   - Patroni
+   - pg_auto_failover
+   - Stolon
+   - repmgr
+
+10. **Document Topology**: Keep replication architecture documented
+
+- **Further Reading**: [PostgreSQL Replication](https://www.postgresql.org/docs/18/high-availability.html) | [Streaming Replication](https://www.postgresql.org/docs/18/warm-standby.html) | [Logical Replication](https://www.postgresql.org/docs/18/logical-replication.html) | [Replication Slots](https://www.postgresql.org/docs/18/warm-standby.html#STREAMING-REPLICATION-SLOTS)
+
+---
 
 ## Conclusion
-This guide provides fundamental knowledge about PostgreSQL, serving as a starting point for further exploration. For more advanced topics, refer to the official PostgreSQL documentation and community resources.
+
+This comprehensive guide has covered the essential and advanced topics of PostgreSQL, providing you with:
+
+### Key Takeaways
+
+1. **Vacuuming** is critical for database health - keep autovacuum enabled and monitor dead tuples
+2. **Indexing** strategies can dramatically improve query performance - use the right index type for your use case
+3. **WAL (Write-Ahead Logging)** ensures durability and enables replication and recovery
+4. **Caching** with proper memory configuration (shared_buffers, work_mem) significantly impacts performance
+5. **Transactions** with MVCC provide powerful concurrency control - understand isolation levels
+6. **Large Object Storage** vs BYTEA - choose based on size and access patterns
+7. **Postmaster Process** architecture and background workers maintain database operations
+8. **Transaction ID Wraparound** requires monitoring - prevent the 4 billion transaction limit issue
+9. **EXPLAIN Plans** are essential for query optimization - learn to read and interpret them
+10. **Deadlocks** can be prevented with careful design - use consistent lock ordering
+11. **System Catalogs** (pg_class, pg_stat_*) provide extensive metadata for monitoring
+12. **Replication** (Physical vs Logical) enables high availability - choose based on requirements
+
+### Next Steps
+
+- **Practice**: Set up a test PostgreSQL environment and experiment with these concepts
+- **Monitor**: Implement monitoring for your production databases using the queries provided
+- **Optimize**: Use EXPLAIN ANALYZE to optimize your slow queries
+- **Secure**: Follow PostgreSQL security best practices
+- **Scale**: Plan for replication and high availability before you need it
+- **Stay Updated**: Follow PostgreSQL release notes and documentation
+
+### Additional Resources
+
+- **Official Documentation**: [PostgreSQL 18 Documentation](https://www.postgresql.org/docs/18/index.html)
+- **Community**: [PostgreSQL Mailing Lists](https://www.postgresql.org/list/)
+- **Books**: "PostgreSQL: Up and Running" by Regina Obe and Leo Hsu
+- **Conferences**: PGCon, PostgreSQL Conference Europe, PGConf
+- **Tools**: pgAdmin, DBeaver, pg_stat_statements, pg_auto_failover
+
+### Contributing
+
+PostgreSQL is open-source and welcomes contributions. Consider:
+- Reporting bugs
+- Contributing code
+- Writing documentation
+- Helping in community forums
+- Sharing your knowledge
+
+### Final Words
+
+PostgreSQL is a powerful, feature-rich database system with decades of development. Mastering these topics will help you build reliable, performant, and scalable applications. Remember:
+
+- **Monitor regularly**: Use the system catalogs and statistics views
+- **Plan for growth**: Design with scalability in mind
+- **Test thoroughly**: Especially replication and recovery procedures
+- **Document everything**: Your future self will thank you
+- **Stay curious**: PostgreSQL is constantly evolving with new features
+
+Happy PostgreSQL administration! 🐘
+
+---
+
+*This guide was created based on PostgreSQL 18 documentation and best practices as of January 2024. Always refer to the official PostgreSQL documentation for the most up-to-date information.*
