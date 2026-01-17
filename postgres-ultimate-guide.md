@@ -1251,22 +1251,1129 @@ SELECT
   - <a href="https://www.postgresql.org/docs/18/mvcc.html">MVCC (Multi-Version Concurrency Control)</a>
 
 ## 6. Large Object Storage
-PostgreSQL supports storing and manipulating large objects using the `lo` module.
 
-- **Example**: `SELECT lo_open(large_object_id, 131072);`
-- **Further Reading**: [PostgreSQL Large Object Documentation](https://www.postgresql.org/docs/18/largeobjects.html)
+PostgreSQL provides two mechanisms for storing large binary data: **Large Objects** (using the `pg_largeobject` system table) and **BYTEA columns**. Large Objects are designed for files that exceed the maximum size of a BYTEA column (1GB) or when you need streaming access to binary data.
+
+### Large Objects vs BYTEA
+
+| Feature | Large Objects | BYTEA Column |
+|---------|--------------|--------------|
+| Maximum size | Unlimited (up to 4TB per object) | 1GB per value |
+| Storage | Stored in `pg_largeobject` table | Stored inline in table |
+| Access | Stream-based (chunks) | All-at-once |
+| Transactions | Separate transaction handling | Standard transactional |
+| Backup | Requires special handling | Standard pg_dump |
+| Performance | Better for very large files | Better for smaller files (<1MB) |
+
+### Using Large Objects
+
+#### Creating and Storing Large Objects
+
+```sql
+-- Method 1: Using lo_import (from file on server)
+SELECT lo_import('/path/to/file.pdf');  -- Returns OID
+-- Returns: 16385 (example OID)
+
+-- Method 2: Using lo_create and lo_put
+SELECT lo_create(0);  -- Creates empty large object, returns OID
+-- Returns: 16386
+
+-- Method 3: From application (using libpq functions)
+-- In application code, use lo_creat(), lo_open(), lo_write()
+
+-- Store the OID in a table
+CREATE TABLE documents (
+    doc_id SERIAL PRIMARY KEY,
+    filename VARCHAR(255),
+    content_type VARCHAR(100),
+    file_size BIGINT,
+    large_object_id OID,  -- Reference to large object
+    uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Insert reference
+INSERT INTO documents (filename, content_type, large_object_id)
+VALUES ('report.pdf', 'application/pdf', 16385);
+```
+
+#### Reading Large Objects
+
+```sql
+-- Method 1: Using lo_export (to file on server)
+SELECT lo_export(16385, '/tmp/exported_file.pdf');
+
+-- Method 2: Using lo_get (read entire content)
+SELECT lo_get(16385);  -- Returns bytea
+
+-- Method 3: Stream-based reading (in application)
+-- Open for reading (mode: 262144 = INV_READ)
+SELECT lo_open(16385, 262144);  -- Returns file descriptor
+-- Returns: 0 (file descriptor)
+
+-- Read chunk (in application using libpq)
+-- lo_read(fd, buffer, length)
+
+-- Close (in application)
+-- lo_close(fd)
+
+-- Example: Retrieve document content
+SELECT 
+    filename,
+    content_type,
+    lo_get(large_object_id) AS content
+FROM documents
+WHERE doc_id = 1;
+```
+
+#### Updating Large Objects
+
+```sql
+-- Open for read/write (mode: 393216 = INV_READ | INV_WRITE)
+SELECT lo_open(16385, 393216);
+
+-- Seek to position (in application)
+-- lo_lseek(fd, offset, whence)
+
+-- Write data (in application)
+-- lo_write(fd, buffer, length)
+
+-- Truncate large object
+SELECT lo_truncate(16385, 1024);  -- Truncate to 1024 bytes
+
+-- Close
+-- lo_close(fd)
+```
+
+#### Deleting Large Objects
+
+```sql
+-- Delete a large object
+SELECT lo_unlink(16385);
+
+-- Important: Delete from your reference table AND the large object
+BEGIN;
+-- Get the OID first
+SELECT large_object_id INTO v_oid FROM documents WHERE doc_id = 1;
+
+-- Delete the reference
+DELETE FROM documents WHERE doc_id = 1;
+
+-- Delete the large object
+SELECT lo_unlink(v_oid);
+COMMIT;
+
+-- Bulk cleanup: Delete orphaned large objects
+SELECT lo_unlink(l.oid)
+FROM pg_largeobject_metadata l
+LEFT JOIN documents d ON d.large_object_id = l.oid
+WHERE d.large_object_id IS NULL;
+```
+
+### The pg_largeobject System Table
+
+Large objects are stored in the `pg_largeobject` system table, which stores data in 2KB chunks.
+
+```sql
+-- View large object metadata
+SELECT * FROM pg_largeobject_metadata;
+-- Columns: oid, lomowner, lomacl
+
+-- View large object data (stored in chunks)
+SELECT * FROM pg_largeobject WHERE loid = 16385;
+-- Columns: loid (large object ID), pageno (chunk number), data (bytea chunk)
+
+-- Check large object size
+SELECT 
+    loid,
+    count(*) AS num_pages,
+    count(*) * 2048 AS approx_bytes,
+    pg_size_pretty(count(*) * 2048) AS approx_size
+FROM pg_largeobject
+GROUP BY loid
+ORDER BY count(*) DESC;
+
+-- List all large objects with ownership
+SELECT 
+    lom.oid,
+    lom.lomowner,
+    pg_get_userbyid(lom.lomowner) AS owner_name,
+    count(lo.pageno) AS pages,
+    pg_size_pretty(count(lo.pageno) * 2048) AS size
+FROM pg_largeobject_metadata lom
+LEFT JOIN pg_largeobject lo ON lom.oid = lo.loid
+GROUP BY lom.oid, lom.lomowner
+ORDER BY count(lo.pageno) DESC;
+```
+
+### Large Object Permissions
+
+```sql
+-- Grant permissions on a large object
+GRANT SELECT ON LARGE OBJECT 16385 TO user_readonly;
+GRANT UPDATE ON LARGE OBJECT 16385 TO user_readwrite;
+
+-- Revoke permissions
+REVOKE ALL ON LARGE OBJECT 16385 FROM user_readonly;
+
+-- Check permissions
+SELECT 
+    oid,
+    lomowner,
+    lomacl
+FROM pg_largeobject_metadata
+WHERE oid = 16385;
+```
+
+### Practical Example: Document Management System
+
+```sql
+-- Create document table with large object references
+CREATE TABLE documents (
+    doc_id SERIAL PRIMARY KEY,
+    filename VARCHAR(255) NOT NULL,
+    content_type VARCHAR(100),
+    file_size BIGINT,
+    large_object_id OID NOT NULL,
+    description TEXT,
+    uploaded_by INTEGER REFERENCES users(user_id),
+    uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    version INTEGER DEFAULT 1
+);
+
+-- Create index on large_object_id for faster lookups
+CREATE INDEX idx_documents_loid ON documents(large_object_id);
+
+-- Function to safely insert a document
+CREATE OR REPLACE FUNCTION insert_document(
+    p_filename VARCHAR,
+    p_content_type VARCHAR,
+    p_data BYTEA,
+    p_uploaded_by INTEGER
+) RETURNS INTEGER AS $$
+DECLARE
+    v_oid OID;
+    v_fd INTEGER;
+    v_doc_id INTEGER;
+BEGIN
+    -- Create large object
+    v_oid := lo_create(0);
+    
+    -- Open for writing
+    v_fd := lo_open(v_oid, 131072);  -- INV_WRITE
+    
+    -- Write data
+    PERFORM lo_write(v_fd, p_data);
+    
+    -- Close
+    PERFORM lo_close(v_fd);
+    
+    -- Insert metadata
+    INSERT INTO documents (filename, content_type, file_size, large_object_id, uploaded_by)
+    VALUES (p_filename, p_content_type, length(p_data), v_oid, p_uploaded_by)
+    RETURNING doc_id INTO v_doc_id;
+    
+    RETURN v_doc_id;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function to safely delete a document
+CREATE OR REPLACE FUNCTION delete_document(p_doc_id INTEGER) RETURNS BOOLEAN AS $$
+DECLARE
+    v_oid OID;
+BEGIN
+    -- Get the large object ID
+    SELECT large_object_id INTO v_oid FROM documents WHERE doc_id = p_doc_id;
+    
+    IF NOT FOUND THEN
+        RETURN FALSE;
+    END IF;
+    
+    -- Delete the document record
+    DELETE FROM documents WHERE doc_id = p_doc_id;
+    
+    -- Delete the large object
+    PERFORM lo_unlink(v_oid);
+    
+    RETURN TRUE;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function to retrieve document content
+CREATE OR REPLACE FUNCTION get_document_content(p_doc_id INTEGER) RETURNS BYTEA AS $$
+DECLARE
+    v_oid OID;
+    v_data BYTEA;
+BEGIN
+    SELECT large_object_id INTO v_oid FROM documents WHERE doc_id = p_doc_id;
+    
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Document not found';
+    END IF;
+    
+    -- Read the entire large object
+    SELECT lo_get(v_oid) INTO v_data;
+    
+    RETURN v_data;
+END;
+$$ LANGUAGE plpgsql;
+```
+
+### Maintenance and Monitoring
+
+```sql
+-- Find orphaned large objects (not referenced by any table)
+-- This query checks the 'documents' table; adjust for your schema
+SELECT l.oid, pg_size_pretty(count(*) * 2048) AS size
+FROM pg_largeobject_metadata l
+WHERE NOT EXISTS (
+    SELECT 1 FROM documents WHERE large_object_id = l.oid
+)
+GROUP BY l.oid;
+
+-- Cleanup orphaned large objects
+-- Create a function for safety
+CREATE OR REPLACE FUNCTION cleanup_orphaned_large_objects() RETURNS INTEGER AS $$
+DECLARE
+    v_count INTEGER := 0;
+    v_oid OID;
+BEGIN
+    FOR v_oid IN 
+        SELECT l.oid
+        FROM pg_largeobject_metadata l
+        WHERE NOT EXISTS (
+            SELECT 1 FROM documents WHERE large_object_id = l.oid
+        )
+    LOOP
+        PERFORM lo_unlink(v_oid);
+        v_count := v_count + 1;
+    END LOOP;
+    
+    RETURN v_count;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Run cleanup
+SELECT cleanup_orphaned_large_objects();
+
+-- Monitor large object storage usage
+SELECT 
+    'Total Large Objects' AS metric,
+    count(*) AS count,
+    pg_size_pretty(sum(count(*) * 2048)) AS total_size
+FROM pg_largeobject
+GROUP BY loid;
+
+-- Check large objects by owner
+SELECT 
+    pg_get_userbyid(lomowner) AS owner,
+    count(*) AS num_objects,
+    pg_size_pretty(sum(pages * 2048)) AS total_size
+FROM pg_largeobject_metadata lom
+LEFT JOIN (
+    SELECT loid, count(*) AS pages FROM pg_largeobject GROUP BY loid
+) lo ON lom.oid = lo.loid
+GROUP BY lomowner
+ORDER BY sum(pages * 2048) DESC;
+```
+
+### Backup and Restore
+
+```bash
+# Large objects require special handling in backups
+
+# Backup with large objects (pg_dump automatically includes them)
+pg_dump -U postgres -d mydb -F c -b -f mydb_backup.dump
+
+# -b or --blobs: Include large objects in the dump
+# -F c: Custom format (recommended)
+
+# Restore with large objects
+pg_restore -U postgres -d mydb_restored -F c mydb_backup.dump
+
+# For plain SQL format:
+pg_dump -U postgres -d mydb -b -f mydb_backup.sql
+
+# Note: Large objects are included automatically in pg_dump 
+# unless you specifically exclude them with --no-blobs
+```
+
+### Best Practices
+
+1. **Always use transactions** when creating/deleting large objects and their references
+2. **Cleanup orphaned large objects** regularly to prevent storage waste
+3. **Consider BYTEA for small files** (<1MB) for simpler management
+4. **Use TOAST for medium files** (1MB-1GB) with BYTEA columns
+5. **Use Large Objects for very large files** (>1GB) or streaming access
+6. **Implement proper cleanup triggers** to automatically delete large objects when references are deleted
+7. **Monitor storage usage** regularly
+8. **Include `-b` flag in backups** to ensure large objects are backed up
+
+### Automatic Cleanup with Triggers
+
+```sql
+-- Trigger to automatically delete large object when document is deleted
+CREATE OR REPLACE FUNCTION delete_document_large_object() RETURNS TRIGGER AS $$
+BEGIN
+    PERFORM lo_unlink(OLD.large_object_id);
+    RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_delete_document_large_object
+BEFORE DELETE ON documents
+FOR EACH ROW
+EXECUTE FUNCTION delete_document_large_object();
+
+-- Trigger to delete old large object when updating reference
+CREATE OR REPLACE FUNCTION update_document_large_object() RETURNS TRIGGER AS $$
+BEGIN
+    IF OLD.large_object_id != NEW.large_object_id THEN
+        PERFORM lo_unlink(OLD.large_object_id);
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_update_document_large_object
+BEFORE UPDATE ON documents
+FOR EACH ROW
+WHEN (OLD.large_object_id IS DISTINCT FROM NEW.large_object_id)
+EXECUTE FUNCTION update_document_large_object();
+```
+
+- **Further Reading**: 
+  - <a href="https://www.postgresql.org/docs/18/largeobjects.html">PostgreSQL Large Objects Documentation</a>
+  - <a href="https://www.postgresql.org/docs/18/lo-funcs.html">Large Object Functions</a>
+  - <a href="https://www.postgresql.org/docs/18/catalog-pg-largeobject.html">pg_largeobject System Catalog</a>
 
 ## 7. Postmaster Process
-The Postmaster is the primary process for a PostgreSQL database cluster responsible for managing the database connections.
 
-- **Example**: You can check the active database connections with `SELECT * FROM pg_stat_activity;`
-- **Further Reading**: [PostgreSQL Postmaster Documentation](https://www.postgresql.org/docs/18/architecture.html#architecture-processes)
+The **Postmaster** is the first process started when PostgreSQL is launched. It's the master control process responsible for managing all other PostgreSQL processes, handling connection requests, and maintaining the overall health of the database cluster.
 
-## 8. ID Wraparound
-To prevent data loss, PostgreSQL requires regular vacuums to manage the transaction ID wraparound.
+### Role and Responsibilities
 
-- **Example**: Check for warnings using the command `VACUUM FREEZE;`
-- **Further Reading**: [PostgreSQL ID Wraparound Documentation](https://www.postgresql.org/docs/18/routine-vacuuming.html#VACUUM-FREEZE)
+The Postmaster process:
+1. **Listens for connections** on the configured port (default: 5432)
+2. **Spawns backend processes** for each client connection
+3. **Manages background worker processes** (autovacuum, WAL writer, checkpointer, etc.)
+4. **Monitors child processes** and performs cleanup if they crash
+5. **Handles shutdown** and startup of the database cluster
+6. **Enforces connection limits** and authentication
+
+### Process Architecture
+
+```
+Postmaster (Main Process)
+    ├── Backend Process 1 (Client connection 1)
+    ├── Backend Process 2 (Client connection 2)
+    ├── Backend Process N (Client connection N)
+    ├── Background Writer
+    ├── WAL Writer
+    ├── Checkpointer
+    ├── Autovacuum Launcher
+    │   ├── Autovacuum Worker 1
+    │   ├── Autovacuum Worker 2
+    │   └── Autovacuum Worker N
+    ├── WAL Sender (for replication)
+    ├── WAL Receiver (on standby)
+    ├── Stats Collector
+    └── Logical Replication Workers
+```
+
+### Starting the Postmaster
+
+```bash
+# Method 1: Using pg_ctl (recommended)
+pg_ctl -D /var/lib/postgresql/data start
+
+# Method 2: Direct invocation
+postgres -D /var/lib/postgresql/data
+
+# Method 3: Using system service (systemd)
+systemctl start postgresql
+
+# Check if postmaster is running
+pg_isready -h localhost -p 5432
+
+# Or check process list
+ps aux | grep postgres
+```
+
+**Example output:**
+```
+postgres   1234  0.0  0.1  ... postgres -D /var/lib/postgresql/data
+postgres   1235  0.0  0.0  ... postgres: checkpointer
+postgres   1236  0.0  0.0  ... postgres: background writer
+postgres   1237  0.0  0.0  ... postgres: walwriter
+postgres   1238  0.0  0.0  ... postgres: autovacuum launcher
+postgres   1239  0.0  0.0  ... postgres: stats collector
+postgres   1240  0.0  0.0  ... postgres: logical replication launcher
+postgres   1241  0.0  0.1  ... postgres: user dbname [local] idle
+```
+
+### Connection Management
+
+#### Connection Process Flow
+
+1. **Client initiates connection** to port 5432
+2. **Postmaster receives connection request**
+3. **Postmaster authenticates client** (using pg_hba.conf rules)
+4. **Postmaster forks a new backend process** dedicated to this client
+5. **Backend process handles all queries** from this client
+6. **Connection ends**: Backend process terminates, Postmaster cleans up
+
+#### Connection Configuration
+
+```conf
+# In postgresql.conf
+
+# Maximum number of connections
+max_connections = 100
+
+# Reserved connections for superusers
+superuser_reserved_connections = 3
+
+# Maximum time to complete connection (seconds)
+authentication_timeout = 60
+
+# TCP/IP settings
+listen_addresses = '*'              # Listen on all interfaces
+port = 5432                         # Default port
+
+# Connection limits per user/database
+# Set in CREATE ROLE or ALTER ROLE:
+# ALTER ROLE username CONNECTION LIMIT 10;
+```
+
+#### Monitoring Connections
+
+```sql
+-- View all active connections
+SELECT 
+    pid,                          -- Process ID
+    usename,                      -- User name
+    application_name,             -- Application name
+    client_addr,                  -- Client IP address
+    client_hostname,              -- Client hostname
+    backend_start,                -- Connection start time
+    state,                        -- Connection state
+    wait_event_type,              -- What the process is waiting for
+    wait_event,                   -- Specific wait event
+    query                         -- Current/last query
+FROM pg_stat_activity
+ORDER BY backend_start;
+
+-- Count connections by state
+SELECT 
+    state,
+    count(*) AS connections
+FROM pg_stat_activity
+GROUP BY state
+ORDER BY count(*) DESC;
+
+-- Count connections by user
+SELECT 
+    usename,
+    count(*) AS connections
+FROM pg_stat_activity
+WHERE usename IS NOT NULL
+GROUP BY usename
+ORDER BY count(*) DESC;
+
+-- Count connections by database
+SELECT 
+    datname,
+    count(*) AS connections
+FROM pg_stat_activity
+GROUP BY datname
+ORDER BY count(*) DESC;
+
+-- Check if approaching max_connections
+SELECT 
+    count(*) AS current_connections,
+    (SELECT setting::int FROM pg_settings WHERE name = 'max_connections') AS max_connections,
+    count(*) * 100.0 / (SELECT setting::int FROM pg_settings WHERE name = 'max_connections') AS percent_used
+FROM pg_stat_activity;
+```
+
+#### Terminating Connections
+
+```sql
+-- Cancel a query (gentle, lets transaction rollback cleanly)
+SELECT pg_cancel_backend(12345);  -- Replace with actual PID
+
+-- Terminate a connection (forceful, immediate rollback)
+SELECT pg_terminate_backend(12345);
+
+-- Terminate all connections for a user
+SELECT pg_terminate_backend(pid)
+FROM pg_stat_activity
+WHERE usename = 'problem_user'
+AND pid != pg_backend_pid();  -- Don't terminate your own connection
+
+-- Terminate all connections to a database (e.g., before dropping it)
+SELECT pg_terminate_backend(pid)
+FROM pg_stat_activity
+WHERE datname = 'target_database'
+AND pid != pg_backend_pid();
+
+-- Terminate idle connections older than 30 minutes
+SELECT pg_terminate_backend(pid)
+FROM pg_stat_activity
+WHERE state = 'idle'
+AND state_change < current_timestamp - interval '30 minutes';
+```
+
+### Background Processes
+
+The Postmaster spawns several background worker processes:
+
+#### 1. Background Writer
+Writes dirty pages from shared buffers to disk gradually to reduce checkpoint I/O spikes.
+
+```conf
+# Configuration in postgresql.conf
+bgwriter_delay = 200ms              # Delay between rounds
+bgwriter_lru_maxpages = 100         # Max pages to write per round
+bgwriter_lru_multiplier = 2.0       # Multiplier for average usage
+```
+
+#### 2. WAL Writer
+Writes WAL records from WAL buffers to WAL files on disk.
+
+```conf
+wal_writer_delay = 200ms            # Delay between WAL writes
+wal_writer_flush_after = 1MB        # Flush after this much data
+```
+
+#### 3. Checkpointer
+Performs checkpoints - writes all dirty pages to disk and creates a checkpoint record in WAL.
+
+```conf
+checkpoint_timeout = 5min           # Time between checkpoints
+checkpoint_completion_target = 0.9  # Fraction of interval for checkpoint I/O
+checkpoint_warning = 30s            # Warn if checkpoints too frequent
+```
+
+#### 4. Autovacuum Launcher and Workers
+Automatically vacuums tables to reclaim space and prevent transaction ID wraparound.
+
+```conf
+autovacuum = on                     # Enable autovacuum
+autovacuum_max_workers = 3          # Number of worker processes
+autovacuum_naptime = 1min           # Time between runs
+```
+
+```sql
+-- Monitor autovacuum activity
+SELECT 
+    pid,
+    state,
+    wait_event_type,
+    wait_event,
+    query
+FROM pg_stat_activity
+WHERE backend_type = 'autovacuum worker';
+```
+
+#### 5. Stats Collector
+Collects statistics about database activity (queries, table access, etc.).
+
+```sql
+-- View collected statistics
+SELECT * FROM pg_stat_user_tables;
+SELECT * FROM pg_stat_statements;  -- Requires pg_stat_statements extension
+```
+
+#### 6. WAL Sender and Receiver
+Handle streaming replication to standby servers.
+
+```sql
+-- On primary: Monitor WAL senders
+SELECT * FROM pg_stat_replication;
+
+-- On standby: Check WAL receiver status
+SELECT * FROM pg_stat_wal_receiver;
+```
+
+### Postmaster Crash Recovery
+
+If the Postmaster crashes or is killed unexpectedly:
+
+1. **Postmaster will not restart automatically** (unless managed by systemd or similar)
+2. **All child processes are terminated**
+3. **On next startup, crash recovery is performed**
+4. **WAL is replayed** to restore consistency
+5. **Database returns to normal operation**
+
+**Safe shutdown methods:**
+```bash
+# Smart shutdown (wait for all clients to disconnect)
+pg_ctl -D /var/lib/postgresql/data stop -m smart
+
+# Fast shutdown (terminate connections, checkpoint)
+pg_ctl -D /var/lib/postgresql/data stop -m fast
+
+# Immediate shutdown (abort immediately, requires crash recovery on restart)
+pg_ctl -D /var/lib/postgresql/data stop -m immediate
+```
+
+### Process Monitoring and Debugging
+
+```sql
+-- List all backend processes
+SELECT 
+    pid,
+    backend_type,          -- Type of backend process
+    backend_start,
+    usename,
+    application_name,
+    client_addr,
+    state,
+    wait_event_type,
+    wait_event
+FROM pg_stat_activity
+ORDER BY backend_type, backend_start;
+
+-- Backend types include:
+-- - client backend
+-- - autovacuum worker
+-- - background writer
+-- - checkpointer
+-- - walwriter
+-- - walsender
+-- - walreceiver
+
+-- Check for processes waiting on locks
+SELECT 
+    pid,
+    usename,
+    pg_blocking_pids(pid) AS blocked_by,
+    wait_event_type,
+    wait_event,
+    state,
+    query
+FROM pg_stat_activity
+WHERE wait_event_type = 'Lock';
+
+-- Memory usage per backend (requires Linux, may need superuser)
+SELECT 
+    pid,
+    usename,
+    application_name,
+    pg_size_pretty((pg_backend_memory_contexts()).*) AS memory_info
+FROM pg_stat_activity
+WHERE backend_type = 'client backend';
+```
+
+### Connection Pooling (External)
+
+The Postmaster creates one process per connection, which can be resource-intensive. For high-connection scenarios, use a connection pooler like **PgBouncer** or **Pgpool-II**.
+
+```ini
+# PgBouncer configuration example
+[databases]
+mydb = host=localhost port=5432 dbname=mydb
+
+[pgbouncer]
+listen_addr = *
+listen_port = 6432
+auth_type = md5
+auth_file = /etc/pgbouncer/userlist.txt
+pool_mode = transaction
+max_client_conn = 1000
+default_pool_size = 25
+```
+
+**Benefit:** 1000 client connections share a pool of 25 database connections.
+
+### Best Practices
+
+1. **Set appropriate max_connections** based on workload and available memory
+2. **Use connection pooling** for high-connection scenarios (web applications)
+3. **Monitor connection usage** regularly to avoid hitting limits
+4. **Set connection timeouts** to prevent hung connections
+5. **Use smart shutdown** for planned maintenance when possible
+6. **Monitor background worker processes** to ensure they're functioning properly
+7. **Configure autovacuum properly** to prevent table bloat and wraparound
+8. **Keep the Postmaster process healthy** - it's a single point of failure
+9. **Use systemd or similar** for automatic restart on crash
+10. **Monitor for crashed backends** and investigate root causes
+
+- **Further Reading**: 
+  - <a href="https://www.postgresql.org/docs/18/app-postgres.html">PostgreSQL Postmaster Documentation</a>
+  - <a href="https://www.postgresql.org/docs/18/runtime-config-connection.html">Connection Configuration</a>
+  - <a href="https://www.postgresql.org/docs/18/monitoring-stats.html">Monitoring Statistics</a>
+
+## 8. Transaction ID Wraparound
+
+Transaction ID wraparound is one of the most critical maintenance concerns in PostgreSQL. Understanding and preventing it is essential for maintaining database health. Failure to address wraparound can lead to database shutdown to prevent data loss.
+
+### Understanding Transaction IDs (XIDs)
+
+PostgreSQL uses 32-bit transaction IDs (XIDs) to implement Multi-Version Concurrency Control (MVCC). Each transaction gets a unique XID, which is used to determine row visibility.
+
+**The problem:** 32-bit integers can only represent about 4.2 billion values (2^32). After that, they wrap around to 0.
+
+**The consequence:** Without proper handling, old transactions could suddenly appear to be "in the future," making old data invisible and potentially causing data loss.
+
+### How PostgreSQL Prevents Wraparound
+
+PostgreSQL uses **transaction ID freezing** to prevent wraparound:
+
+1. **Freezing**: Old transaction IDs are replaced with a special "frozen" transaction ID (FrozenXID = 2)
+2. **Frozen XIDs appear in the past** to all current and future transactions
+3. **VACUUM FREEZE** performs this freezing operation
+4. **Autovacuum** automatically freezes old rows based on age thresholds
+
+### Monitoring Transaction Age
+
+```sql
+-- Check the age of the oldest transaction ID in each table
+SELECT 
+    c.oid::regclass AS table_name,
+    age(c.relfrozenxid) AS xid_age,
+    pg_size_pretty(pg_total_relation_size(c.oid)) AS table_size,
+    c.relfrozenxid
+FROM pg_class c
+JOIN pg_namespace n ON c.relnamespace = n.oid
+WHERE c.relkind IN ('r', 't')  -- Regular tables and TOAST tables
+AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+ORDER BY age(c.relfrozenxid) DESC
+LIMIT 20;
+
+-- Check database-wide oldest frozen XID
+SELECT 
+    datname,
+    age(datfrozenxid) AS xid_age,
+    datfrozenxid,
+    2147483647 - age(datfrozenxid) AS xids_until_wraparound
+FROM pg_database
+ORDER BY age(datfrozenxid) DESC;
+
+-- Warning threshold: age > 1 billion is concerning
+-- Critical threshold: age > 1.5 billion requires immediate action
+-- Emergency: age > 2 billion (autovacuum_freeze_max_age default)
+
+-- Check for tables approaching wraparound
+SELECT 
+    schemaname,
+    tablename,
+    age(relfrozenxid) AS xid_age,
+    CASE 
+        WHEN age(relfrozenxid) > 1500000000 THEN 'CRITICAL - IMMEDIATE ACTION REQUIRED'
+        WHEN age(relfrozenxid) > 1000000000 THEN 'WARNING - Schedule maintenance soon'
+        WHEN age(relfrozenxid) > 500000000 THEN 'NOTICE - Monitor closely'
+        ELSE 'OK'
+    END AS status
+FROM pg_stat_user_tables
+ORDER BY age(relfrozenxid) DESC;
+```
+
+### Configuration Parameters
+
+```conf
+# In postgresql.conf
+
+# --- Transaction ID Wraparound Prevention ---
+
+# Vacuum automatically freezes tuples older than this many transactions
+# Default: 50 million transactions
+vacuum_freeze_min_age = 50000000
+
+# Force a table-scanning vacuum if relfrozenxid is older than this
+# Default: 150 million transactions
+vacuum_freeze_table_age = 150000000
+
+# Force autovacuum if age exceeds this (last resort protection)
+# Default: 200 million transactions (about 2 billion total before wraparound)
+autovacuum_freeze_max_age = 200000000
+
+# Similar settings for multixact IDs (used for row-level locks)
+vacuum_multixact_freeze_min_age = 5000000
+vacuum_multixact_freeze_table_age = 150000000
+autovacuum_multixact_freeze_max_age = 400000000
+```
+
+**Understanding the parameters:**
+
+- `vacuum_freeze_min_age`: Minimum age before VACUUM freezes a tuple (balances I/O vs safety)
+- `vacuum_freeze_table_age`: Age at which VACUUM scans the entire table (even index-only pages)
+- `autovacuum_freeze_max_age`: Emergency threshold that forces autovacuum even if disabled
+
+### Manual Freezing
+
+```sql
+-- Freeze a specific table
+VACUUM FREEZE my_table;
+
+-- Freeze with verbose output
+VACUUM FREEZE VERBOSE my_table;
+
+-- Freeze all tables in a database
+VACUUM FREEZE;
+
+-- Aggressive vacuum freeze (for emergency situations)
+-- Note: This can take a very long time and increase I/O significantly
+VACUUM (FREEZE, VERBOSE) my_table;
+
+-- Check what VACUUM FREEZE would do without actually doing it
+-- (Requires PostgreSQL 12+)
+VACUUM (FREEZE, VERBOSE, DRY_RUN) my_table;
+```
+
+### Autovacuum and Freezing
+
+Autovacuum automatically handles freezing, but you should monitor it:
+
+```sql
+-- Check when tables were last autovacuumed
+SELECT 
+    schemaname,
+    relname,
+    last_vacuum,
+    last_autovacuum,
+    vacuum_count,
+    autovacuum_count,
+    age(relfrozenxid) AS xid_age,
+    n_dead_tup,
+    n_live_tup
+FROM pg_stat_user_tables
+ORDER BY age(relfrozenxid) DESC
+LIMIT 20;
+
+-- Check autovacuum activity right now
+SELECT 
+    pid,
+    usename,
+    datname,
+    state,
+    wait_event_type,
+    wait_event,
+    query_start,
+    query
+FROM pg_stat_activity
+WHERE query LIKE '%autovacuum%'
+AND pid != pg_backend_pid();
+
+-- Check if autovacuum is keeping up
+SELECT 
+    relname,
+    age(relfrozenxid) AS xid_age,
+    last_autovacuum,
+    autovacuum_count,
+    CASE 
+        WHEN last_autovacuum IS NULL THEN 'NEVER autovacuumed!'
+        WHEN last_autovacuum < now() - interval '1 week' AND age(relfrozenxid) > 100000000 
+            THEN 'Autovacuum falling behind'
+        ELSE 'OK'
+    END AS autovacuum_status
+FROM pg_stat_user_tables
+WHERE age(relfrozenxid) > 100000000
+ORDER BY age(relfrozenxid) DESC;
+```
+
+### Preventing Wraparound Issues
+
+#### 1. Ensure Autovacuum is Enabled and Working
+
+```sql
+-- Check if autovacuum is enabled globally
+SHOW autovacuum;
+
+-- Check autovacuum configuration
+SELECT 
+    name,
+    setting,
+    unit,
+    short_desc
+FROM pg_settings
+WHERE name LIKE 'autovacuum%'
+ORDER BY name;
+
+-- Check if any tables have autovacuum disabled
+SELECT 
+    n.nspname,
+    c.relname,
+    c.reloptions
+FROM pg_class c
+JOIN pg_namespace n ON c.relnamespace = n.oid
+WHERE c.relkind = 'r'
+AND EXISTS (
+    SELECT 1 FROM unnest(c.reloptions) opt 
+    WHERE opt LIKE 'autovacuum_enabled=false'
+);
+```
+
+#### 2. Monitor XID Age Regularly
+
+```sql
+-- Create a monitoring query you can run regularly (daily)
+CREATE OR REPLACE VIEW wraparound_monitoring AS
+SELECT 
+    schemaname || '.' || tablename AS table_name,
+    age(relfrozenxid) AS xid_age,
+    2000000000 - age(relfrozenxid) AS xids_remaining,
+    pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) AS table_size,
+    last_autovacuum,
+    last_vacuum,
+    CASE 
+        WHEN age(relfrozenxid) > 1500000000 THEN 'CRITICAL'
+        WHEN age(relfrozenxid) > 1000000000 THEN 'WARNING'
+        WHEN age(relfrozenxid) > 500000000 THEN 'NOTICE'
+        ELSE 'OK'
+    END AS status
+FROM pg_stat_user_tables
+ORDER BY age(relfrozenxid) DESC;
+
+-- Query the view
+SELECT * FROM wraparound_monitoring WHERE status != 'OK';
+```
+
+#### 3. Schedule Preventive Maintenance
+
+```sql
+-- For very large tables, schedule regular VACUUM FREEZE during low-activity periods
+-- Example maintenance script:
+
+DO $$
+DECLARE
+    table_rec RECORD;
+BEGIN
+    FOR table_rec IN 
+        SELECT schemaname, tablename
+        FROM pg_stat_user_tables
+        WHERE age(relfrozenxid) > 800000000
+        ORDER BY age(relfrozenxid) DESC
+    LOOP
+        RAISE NOTICE 'Freezing %.%', table_rec.schemaname, table_rec.tablename;
+        EXECUTE format('VACUUM FREEZE %I.%I', table_rec.schemaname, table_rec.tablename);
+    END LOOP;
+END $$;
+```
+
+#### 4. Tune Autovacuum for Large Tables
+
+For tables that grow very large, tune autovacuum settings per-table:
+
+```sql
+-- Make autovacuum more aggressive for a specific large table
+ALTER TABLE large_table SET (
+    autovacuum_vacuum_scale_factor = 0.01,  -- Vacuum at 1% dead tuples (default: 20%)
+    autovacuum_vacuum_threshold = 1000,
+    autovacuum_freeze_min_age = 1000000,
+    autovacuum_freeze_max_age = 150000000
+);
+
+-- For append-only tables (like logs), tune insert-based autovacuum
+ALTER TABLE log_table SET (
+    autovacuum_vacuum_insert_threshold = 10000,
+    autovacuum_vacuum_insert_scale_factor = 0.1
+);
+
+-- Allocate more memory to autovacuum for faster operation
+ALTER TABLE large_table SET (
+    autovacuum_work_mem = '1GB'
+);
+```
+
+### Emergency Response: Wraparound Shutdown Prevention
+
+If a database is approaching wraparound (age > 2 billion), PostgreSQL will:
+
+1. **Emit warnings** in logs when age > 1.5 billion
+2. **Stop accepting new transactions** when age approaches 2^31 - 1000000
+3. **Shut down** to prevent data loss
+
+**Emergency response procedure:**
+
+```sql
+-- 1. Check the severity
+SELECT 
+    datname,
+    age(datfrozenxid) AS xid_age,
+    2147483647 - age(datfrozenxid) AS xids_until_emergency_shutdown
+FROM pg_database
+ORDER BY age(datfrozenxid) DESC;
+
+-- 2. If critical, immediately freeze the oldest tables
+-- Start with smallest tables first for quick wins
+SELECT 
+    schemaname || '.' || tablename AS table_name,
+    age(relfrozenxid) AS xid_age,
+    pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) AS size
+FROM pg_stat_user_tables
+WHERE age(relfrozenxid) > 1500000000
+ORDER BY pg_total_relation_size(schemaname||'.'||tablename) ASC;
+
+-- 3. Freeze tables one by one
+VACUUM FREEZE VERBOSE small_table_1;
+VACUUM FREEZE VERBOSE small_table_2;
+-- Continue until age is below danger threshold
+
+-- 4. For very large tables, consider using pg_repack or similar tools
+-- to avoid long-running VACUUM operations
+```
+
+### Best Practices
+
+1. **Enable autovacuum** and ensure it's running (it's on by default)
+2. **Monitor XID age regularly** (at least weekly for large databases)
+3. **Set up alerts** for tables with age > 1 billion transactions
+4. **Never disable autovacuum** on production databases (or only very temporarily)
+5. **Tune autovacuum** for large, frequently-updated tables
+6. **Schedule preventive VACUUM FREEZE** for very large tables
+7. **Monitor autovacuum logs** to ensure it's completing successfully
+8. **Plan for growth** - more transactions = faster XID consumption
+9. **Test recovery procedures** before an emergency occurs
+10. **Keep statistics up to date** to help autovacuum make good decisions
+
+### Common Causes of Wraparound Issues
+
+1. **Autovacuum disabled** globally or on specific tables
+2. **Long-running transactions** blocking autovacuum
+3. **Prepared transactions** left open (2PC)
+4. **Replication slots** preventing old WAL removal
+5. **Insufficient autovacuum workers** for workload
+6. **I/O constraints** making vacuum too slow
+7. **Very large tables** taking too long to vacuum
+
+```sql
+-- Find long-running transactions blocking autovacuum
+SELECT 
+    pid,
+    usename,
+    datname,
+    state,
+    backend_xid,
+    backend_xmin,
+    now() - xact_start AS duration,
+    query
+FROM pg_stat_activity
+WHERE xact_start IS NOT NULL
+AND state != 'idle'
+ORDER BY xact_start
+LIMIT 10;
+
+-- Find prepared transactions
+SELECT * FROM pg_prepared_xacts;
+
+-- Find replication slots
+SELECT 
+    slot_name,
+    slot_type,
+    database,
+    active,
+    xmin,
+    catalog_xmin,
+    restart_lsn
+FROM pg_replication_slots;
+```
+
+- **Further Reading**: 
+  - <a href="https://www.postgresql.org/docs/18/routine-vacuuming.html#VACUUM-FOR-WRAPAROUND">PostgreSQL Transaction ID Wraparound</a>
+  - <a href="https://www.postgresql.org/docs/18/routine-vacuuming.html">Routine Vacuuming</a>
+  - <a href="https://wiki.postgresql.org/wiki/Wraparound">PostgreSQL Wiki: Wraparound</a>
 
 ## 9. Explain Plans
 The `EXPLAIN` command provides insight into how PostgreSQL executes queries.
